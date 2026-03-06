@@ -1,0 +1,10 @@
+{
+  "automationTool": "playwright",
+  "browser": "chrome",
+  "headless": false,
+  "timeoutSeconds": 60,
+  "concurrency": 1,
+  "regressionSweep": true,
+  "outputFolder": "output",
+  "environment": "local"
+}

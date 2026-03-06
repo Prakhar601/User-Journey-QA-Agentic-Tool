@@ -1,0 +1,25 @@
+{
+  "name": "ai-regression-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+  "build": "tsc",
+  "dev": "ts-node src/index.ts",
+  "launch": "ts-node src/autoLaunch.ts"
+},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@types/node": "^25.3.0",
+    "dotenv": "^17.3.1",
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.58.2",
+    "readline-sync": "^1.4.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "xlsx": "^0.18.5"
+  }
+}
