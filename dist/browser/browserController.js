@@ -36,9 +36,18 @@ class BrowserController {
         if ((await passwordLocator.count()) > 0) {
             await passwordLocator.fill(password);
         }
-        const submitSelector = 'button[type="submit"], input[type="submit"], button:has-text("Sign in"), button:has-text("Log in"), button:has-text("Continue")';
-        const submitLocator = page.locator(submitSelector).first();
-        if ((await submitLocator.count()) > 0) {
+        // Prioritize login-related buttons; "Continue" only as last fallback (avoids "Continue Shopping", etc.)
+        const loginSubmitSelectors = [
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button:has-text("Sign in")',
+            'button:has-text("Log in")',
+            'button:has-text("Login")',
+            'button:has-text("Submit")',
+            'button:has-text("Continue")',
+        ];
+        const submitLocator = await this.findFirstVisibleSubmitLocator(page, loginSubmitSelectors);
+        if (submitLocator) {
             await Promise.all([
                 page
                     .waitForLoadState("networkidle", { timeout: this.timeoutMs })
@@ -61,7 +70,10 @@ class BrowserController {
     }
     async click(selector) {
         const page = (0, browserSession_1.getPage)();
-        await page.click(selector);
+        const locator = await this.buildSmartLocator(selector, page);
+        await locator.waitFor({ state: "visible", timeout: this.timeoutMs });
+        await locator.scrollIntoViewIfNeeded();
+        await locator.click();
     }
     async scroll() {
         const page = (0, browserSession_1.getPage)();
@@ -91,9 +103,15 @@ class BrowserController {
         }
         const otpCode = readline_sync_1.default.question("Enter OTP: ");
         await otpLocator.fill(otpCode);
-        const submitSelector = 'button[type="submit"], input[type="submit"], button:has-text("Verify"), button:has-text("Continue"), button:has-text("Submit")';
-        const submitLocator = page.locator(submitSelector).first();
-        if ((await submitLocator.count()) > 0) {
+        const twoFactorSubmitSelectors = [
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button:has-text("Verify")',
+            'button:has-text("Submit")',
+            'button:has-text("Continue")',
+        ];
+        const submitLocator = await this.findFirstVisibleSubmitLocator(page, twoFactorSubmitSelectors);
+        if (submitLocator) {
             await Promise.all([
                 page
                     .waitForLoadState("networkidle", { timeout: this.timeoutMs })
@@ -109,6 +127,110 @@ class BrowserController {
                 page.keyboard.press("Enter"),
             ]);
         }
+    }
+    /**
+     * Tries each selector in order and returns the first matching locator that is visible and
+     * interactable. Skips hidden modal buttons (e.g. "Continue Shopping"). "Continue" is only
+     * used as fallback and must pass visibility checks; buttons like "Continue Shopping" are
+     * rejected by requiring exact text "Continue" when the selector matches that label.
+     */
+    async findFirstVisibleSubmitLocator(page, selectors) {
+        for (const selector of selectors) {
+            const locator = page.locator(selector).first();
+            try {
+                if ((await locator.count()) === 0)
+                    continue;
+                if (!(await locator.isVisible()))
+                    continue;
+                if (selector.includes("Continue") && !selector.includes("Verify")) {
+                    const text = await locator.evaluate((el) => el.innerText?.trim() ?? "");
+                    if (text !== "Continue")
+                        continue;
+                }
+                await locator.waitFor({ state: "visible", timeout: 2000 });
+                await locator.scrollIntoViewIfNeeded();
+                return locator;
+            }
+            catch {
+                continue;
+            }
+        }
+        return null;
+    }
+    async buildSmartLocator(selector, page) {
+        const trimmedSelector = selector.trim();
+        if (!trimmedSelector) {
+            return page.locator(selector);
+        }
+        const baseLocator = page.locator(trimmedSelector).first();
+        try {
+            const info = await baseLocator.evaluate((el) => {
+                const element = el;
+                const getAttr = (name) => element.getAttribute(name);
+                const tagName = element.tagName.toLowerCase();
+                const id = element.id || null;
+                const dataTestId = getAttr("data-testid");
+                const dataTest = getAttr("data-test");
+                const dataQa = getAttr("data-qa");
+                const ariaLabel = getAttr("aria-label");
+                const role = getAttr("role");
+                const placeholder = element.placeholder ??
+                    null;
+                const text = (element.innerText || element.textContent || "").trim();
+                return {
+                    tagName,
+                    id,
+                    dataTestId,
+                    dataTest,
+                    dataQa,
+                    ariaLabel,
+                    role,
+                    placeholder,
+                    text,
+                };
+            });
+            // Selector ranking priority:
+            // 1) data-testid
+            // 2) data-test
+            // 3) data-qa
+            // 4) aria-label
+            // 5) role with visible text
+            // 6) placeholder
+            // 7) element text
+            // 8) id
+            // 9) fallback CSS selector
+            if (info.dataTestId) {
+                return page.getByTestId(info.dataTestId);
+            }
+            if (info.dataTest) {
+                return page.locator(`[data-test="${BrowserController.escapeForAttribute(info.dataTest)}"]`);
+            }
+            if (info.dataQa) {
+                return page.locator(`[data-qa="${BrowserController.escapeForAttribute(info.dataQa)}"]`);
+            }
+            if (info.ariaLabel) {
+                return page.getByLabel(info.ariaLabel);
+            }
+            if (info.role && info.text) {
+                return page.getByRole(info.role, { name: info.text });
+            }
+            if (info.placeholder) {
+                return page.getByPlaceholder(info.placeholder);
+            }
+            if (info.text) {
+                return page.getByText(info.text);
+            }
+            if (info.id) {
+                return page.locator(`#${BrowserController.escapeForAttribute(info.id)}`);
+            }
+            return baseLocator;
+        }
+        catch {
+            return baseLocator;
+        }
+    }
+    static escapeForAttribute(value) {
+        return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     }
 }
 exports.BrowserController = BrowserController;

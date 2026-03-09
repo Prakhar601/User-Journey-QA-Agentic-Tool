@@ -844,6 +844,12 @@ function extractInteractiveElements(domSnapshot) {
         const id = attrs.id;
         const name = attrs.name;
         const type = attrs.type || attrs.role;
+        const dataTestId = attrs["data-testid"];
+        const dataTest = attrs["data-test"];
+        const dataQa = attrs["data-qa"];
+        const ariaLabel = attrs["aria-label"];
+        const role = attrs.role;
+        const placeholder = attrs.placeholder;
         const text = textContent && textContent.trim().length > 0
             ? textContent.trim().slice(0, 200)
             : undefined;
@@ -852,6 +858,12 @@ function extractInteractiveElements(domSnapshot) {
             id ?? "",
             name ?? "",
             type ?? "",
+            dataTestId ?? "",
+            dataTest ?? "",
+            dataQa ?? "",
+            ariaLabel ?? "",
+            role ?? "",
+            placeholder ?? "",
             text ?? "",
         ].join("|");
         if (seenKeys.has(key)) {
@@ -864,6 +876,12 @@ function extractInteractiveElements(domSnapshot) {
             text,
             name,
             type,
+            dataTestId,
+            dataTest,
+            dataQa,
+            ariaLabel,
+            role,
+            placeholder,
         });
     };
     const attributeRegex = /(\w[\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;

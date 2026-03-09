@@ -631,6 +631,12 @@ type InteractiveElementSummary = {
   text?: string;
   name?: string;
   type?: string;
+  dataTestId?: string;
+  dataTest?: string;
+  dataQa?: string;
+  ariaLabel?: string;
+  role?: string;
+  placeholder?: string;
 };
 
 let phase3Logged: boolean = false;
@@ -1189,6 +1195,12 @@ function extractInteractiveElements(
     const id: string | undefined = attrs.id;
     const name: string | undefined = attrs.name;
     const type: string | undefined = attrs.type || attrs.role;
+    const dataTestId: string | undefined = attrs["data-testid"];
+    const dataTest: string | undefined = attrs["data-test"];
+    const dataQa: string | undefined = attrs["data-qa"];
+    const ariaLabel: string | undefined = attrs["aria-label"];
+    const role: string | undefined = attrs.role;
+    const placeholder: string | undefined = attrs.placeholder;
     const text: string | undefined =
       textContent && textContent.trim().length > 0
         ? textContent.trim().slice(0, 200)
@@ -1199,6 +1211,12 @@ function extractInteractiveElements(
       id ?? "",
       name ?? "",
       type ?? "",
+      dataTestId ?? "",
+      dataTest ?? "",
+      dataQa ?? "",
+      ariaLabel ?? "",
+      role ?? "",
+      placeholder ?? "",
       text ?? "",
     ].join("|");
     if (seenKeys.has(key)) {
@@ -1212,6 +1230,12 @@ function extractInteractiveElements(
       text,
       name,
       type,
+      dataTestId,
+      dataTest,
+      dataQa,
+      ariaLabel,
+      role,
+      placeholder,
     });
   };
 

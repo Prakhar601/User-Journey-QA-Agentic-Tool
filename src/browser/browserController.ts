@@ -53,11 +53,22 @@ export class BrowserController {
       await passwordLocator.fill(password);
     }
 
-    const submitSelector: string =
-      'button[type="submit"], input[type="submit"], button:has-text("Sign in"), button:has-text("Log in"), button:has-text("Continue")';
-    const submitLocator: Locator = page.locator(submitSelector).first();
+    // Prioritize login-related buttons; "Continue" only as last fallback (avoids "Continue Shopping", etc.)
+    const loginSubmitSelectors: string[] = [
+      'button[type="submit"]',
+      'input[type="submit"]',
+      'button:has-text("Sign in")',
+      'button:has-text("Log in")',
+      'button:has-text("Login")',
+      'button:has-text("Submit")',
+      'button:has-text("Continue")',
+    ];
+    const submitLocator: Locator | null = await this.findFirstVisibleSubmitLocator(
+      page,
+      loginSubmitSelectors
+    );
 
-    if ((await submitLocator.count()) > 0) {
+    if (submitLocator) {
       await Promise.all([
         page
           .waitForLoadState("networkidle", { timeout: this.timeoutMs })
@@ -86,7 +97,11 @@ export class BrowserController {
 
   public async click(selector: string): Promise<void> {
     const page: Page = getPage();
-    await page.click(selector);
+    const locator: Locator = await this.buildSmartLocator(selector, page);
+
+    await locator.waitFor({ state: "visible", timeout: this.timeoutMs });
+    await locator.scrollIntoViewIfNeeded();
+    await locator.click();
   }
 
   public async scroll(): Promise<void> {
@@ -128,11 +143,19 @@ export class BrowserController {
 
     await otpLocator.fill(otpCode);
 
-    const submitSelector: string =
-      'button[type="submit"], input[type="submit"], button:has-text("Verify"), button:has-text("Continue"), button:has-text("Submit")';
-    const submitLocator: Locator = page.locator(submitSelector).first();
+    const twoFactorSubmitSelectors: string[] = [
+      'button[type="submit"]',
+      'input[type="submit"]',
+      'button:has-text("Verify")',
+      'button:has-text("Submit")',
+      'button:has-text("Continue")',
+    ];
+    const submitLocator: Locator | null = await this.findFirstVisibleSubmitLocator(
+      page,
+      twoFactorSubmitSelectors
+    );
 
-    if ((await submitLocator.count()) > 0) {
+    if (submitLocator) {
       await Promise.all([
         page
           .waitForLoadState("networkidle", { timeout: this.timeoutMs })
@@ -147,5 +170,137 @@ export class BrowserController {
         page.keyboard.press("Enter"),
       ]);
     }
+  }
+
+  /**
+   * Tries each selector in order and returns the first matching locator that is visible and
+   * interactable. Skips hidden modal buttons (e.g. "Continue Shopping"). "Continue" is only
+   * used as fallback and must pass visibility checks; buttons like "Continue Shopping" are
+   * rejected by requiring exact text "Continue" when the selector matches that label.
+   */
+  private async findFirstVisibleSubmitLocator(
+    page: Page,
+    selectors: string[]
+  ): Promise<Locator | null> {
+    for (const selector of selectors) {
+      const locator: Locator = page.locator(selector).first();
+      try {
+        if ((await locator.count()) === 0) continue;
+        if (!(await locator.isVisible())) continue;
+        if (selector.includes("Continue") && !selector.includes("Verify")) {
+          const text = await locator.evaluate((el) => (el as HTMLElement).innerText?.trim() ?? "");
+          if (text !== "Continue") continue;
+        }
+        await locator.waitFor({ state: "visible", timeout: 2000 });
+        await locator.scrollIntoViewIfNeeded();
+        return locator;
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  private async buildSmartLocator(
+    selector: string,
+    page: Page
+  ): Promise<Locator> {
+    const trimmedSelector: string = selector.trim();
+    if (!trimmedSelector) {
+      return page.locator(selector);
+    }
+
+    const baseLocator: Locator = page.locator(trimmedSelector).first();
+
+    try {
+      const info = await baseLocator.evaluate((el) => {
+        const element = el as HTMLElement;
+        const getAttr = (name: string): string | null =>
+          element.getAttribute(name);
+
+        const tagName: string = element.tagName.toLowerCase();
+        const id: string | null = element.id || null;
+        const dataTestId: string | null = getAttr("data-testid");
+        const dataTest: string | null = getAttr("data-test");
+        const dataQa: string | null = getAttr("data-qa");
+        const ariaLabel: string | null = getAttr("aria-label");
+        const role: string | null = getAttr("role");
+        const placeholder: string | null =
+          (element as HTMLInputElement | HTMLTextAreaElement).placeholder ??
+          null;
+        const text: string = (
+          (element.innerText || element.textContent || "") as string
+        ).trim();
+
+        return {
+          tagName,
+          id,
+          dataTestId,
+          dataTest,
+          dataQa,
+          ariaLabel,
+          role,
+          placeholder,
+          text,
+        };
+      });
+
+      // Selector ranking priority:
+      // 1) data-testid
+      // 2) data-test
+      // 3) data-qa
+      // 4) aria-label
+      // 5) role with visible text
+      // 6) placeholder
+      // 7) element text
+      // 8) id
+      // 9) fallback CSS selector
+
+      if (info.dataTestId) {
+        return page.getByTestId(info.dataTestId);
+      }
+
+      if (info.dataTest) {
+        return page.locator(
+          `[data-test="${BrowserController.escapeForAttribute(info.dataTest)}"]`
+        );
+      }
+
+      if (info.dataQa) {
+        return page.locator(
+          `[data-qa="${BrowserController.escapeForAttribute(info.dataQa)}"]`
+        );
+      }
+
+      if (info.ariaLabel) {
+        return page.getByLabel(info.ariaLabel);
+      }
+
+      if (info.role && info.text) {
+        return page.getByRole(info.role as any, { name: info.text });
+      }
+
+      if (info.placeholder) {
+        return page.getByPlaceholder(info.placeholder);
+      }
+
+      if (info.text) {
+        return page.getByText(info.text);
+      }
+
+      if (info.id) {
+        return page.locator(
+          `#${BrowserController.escapeForAttribute(info.id)}`
+        );
+      }
+
+      return baseLocator;
+    } catch {
+      return baseLocator;
+    }
+  }
+
+  private static escapeForAttribute(value: string): string {
+    return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   }
 }
