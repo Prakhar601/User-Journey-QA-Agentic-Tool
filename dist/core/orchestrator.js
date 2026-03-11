@@ -41,7 +41,7 @@ const seleniumBrowserController_1 = require("../browser/seleniumBrowserControlle
 const plannerAgent_1 = require("../agents/plannerAgent");
 const mcpClient_1 = require("../ai/mcpClient");
 const githubModelsClient_1 = require("../ai/githubModelsClient");
-const networkSummary_1 = require("../reporting/networkSummary");
+const networkAnalyzer_1 = require("../browser/networkAnalyzer");
 const outputManager_1 = require("../reporting/outputManager");
 let phase4Logged = false;
 async function runWorkflow(config) {
@@ -94,6 +94,7 @@ async function runWorkflow(config) {
             if (adaptiveMode === true) {
                 const networkValidationNotes = [];
                 const baselineNetworkLogsLength = (await browser.getNetworkLogs()).length;
+                const scenarioStartTimeMs = Date.now();
                 const adaptiveResult = await adaptiveExecutionLoop({
                     browser,
                     tool,
@@ -115,6 +116,7 @@ async function runWorkflow(config) {
                     networkValidationRules: [],
                 };
                 const postDomSnapshot = await browser.getDOMSnapshot();
+                const scenarioEndTimeMs = Date.now();
                 const uiChanged = postDomSnapshot !== initialDomSnapshot;
                 const allNetworkLogs = await browser.getNetworkLogs();
                 const allEndpoints = allNetworkLogs.map((entry) => entry.url);
@@ -142,7 +144,6 @@ async function runWorkflow(config) {
                 if (adaptiveResult.uiNotes.trim().length > 0) {
                     actualParts.push(adaptiveResult.uiNotes.trim());
                 }
-                let networkSummary;
                 const apiLikeEntries = scenarioNetworkLogs.filter((entry) => {
                     if (!entry || typeof entry !== "object") {
                         return false;
@@ -150,6 +151,10 @@ async function runWorkflow(config) {
                     const e = entry;
                     const url = typeof e.url === "string" ? e.url : "";
                     const method = typeof e.method === "string" ? e.method.toUpperCase() : "";
+                    const headerContentType = e.responseHeaders?.["content-type"];
+                    const contentType = (typeof e.contentType === "string"
+                        ? e.contentType
+                        : headerContentType ?? "").toLowerCase();
                     if (!url) {
                         return false;
                     }
@@ -158,7 +163,7 @@ async function runWorkflow(config) {
                         url.startsWith("chrome:")) {
                         return false;
                     }
-                    if (/\.(png|jpe?g|gif|svg|ico|css|js|woff2?|ttf)(\?|$)/i.test(url)) {
+                    if (url.match(/\.(png|jpe?g|gif|svg|css|js|woff2?|ttf|ico|map)(\?|$)/i)) {
                         return false;
                     }
                     if (method === "POST" ||
@@ -167,27 +172,60 @@ async function runWorkflow(config) {
                         method === "DELETE") {
                         return true;
                     }
-                    if (url.toLowerCase().includes("/api/")) {
+                    if (contentType.includes("application/json")) {
+                        return true;
+                    }
+                    const lowerUrl = url.toLowerCase();
+                    if (lowerUrl.includes("/api/") ||
+                        lowerUrl.includes("/graphql") ||
+                        lowerUrl.includes("/auth") ||
+                        lowerUrl.includes("/login")) {
                         return true;
                     }
                     return false;
                 });
-                const primaryEntry = apiLikeEntries.length > 0
-                    ? apiLikeEntries[apiLikeEntries.length - 1]
-                    : undefined;
-                if (!primaryEntry) {
-                    networkSummary = "No external API interaction detected.";
+                let metricsForScenario = null;
+                if (apiLikeEntries.length === 0) {
+                    actualParts.push("No external API interaction detected.");
                 }
                 else {
-                    const statusCode = typeof primaryEntry.status === "number"
-                        ? primaryEntry.status
-                        : null;
-                    const responseTimeMs = typeof primaryEntry.durationMs === "number"
-                        ? primaryEntry.durationMs
-                        : null;
-                    networkSummary = (0, networkSummary_1.generateNetworkSummary)(statusCode, responseTimeMs);
+                    const networkData = apiLikeEntries.map((entry) => {
+                        const url = typeof entry.url === "string" ? entry.url : "";
+                        const method = typeof entry.method === "string"
+                            ? entry.method.toUpperCase()
+                            : "GET";
+                        const status = typeof entry.status === "number" ? entry.status : 0;
+                        const durationMs = typeof entry.durationMs === "number" &&
+                            Number.isFinite(entry.durationMs) &&
+                            entry.durationMs >= 0
+                            ? entry.durationMs
+                            : 0;
+                        const duration = durationMs;
+                        const startTime = 0;
+                        const endTime = duration;
+                        return {
+                            url,
+                            method,
+                            status,
+                            startTime,
+                            endTime,
+                            duration,
+                            resourceType: "xhr",
+                        };
+                    });
+                    const metrics = (0, networkAnalyzer_1.analyzeNetwork)(networkData);
+                    metricsForScenario = metrics;
+                    if (metrics.totalApiCalls === 0) {
+                        actualParts.push("No external API interaction detected.");
+                    }
+                    else {
+                        const networkSummary = `Network analysis: Total API calls: ${metrics.totalApiCalls}, ` +
+                            `Average latency: ${Math.round(metrics.averageLatency)} ms, ` +
+                            `Total API time: ${metrics.totalApiTime} ms, ` +
+                            `Unique API endpoints: ${metrics.apiCalls.length}.`;
+                        actualParts.push(networkSummary);
+                    }
                 }
-                actualParts.push(`Network observation: ${networkSummary}`);
                 const actual = actualParts.join(" ");
                 const pass = !adaptiveResult.stepExecutionFailed &&
                     uiChanged &&
@@ -204,6 +242,12 @@ async function runWorkflow(config) {
                         ? adaptiveResult.screenshots.slice()
                         : undefined,
                 };
+                if (metricsForScenario) {
+                    const augmented = scenarioResult;
+                    augmented.networkMetrics = metricsForScenario;
+                    augmented.scenarioStartTimeMs = scenarioStartTimeMs;
+                    augmented.scenarioEndTimeMs = scenarioEndTimeMs;
+                }
                 scenarioResults.push(scenarioResult);
                 if (Date.now() > deadlineMs) {
                     break;
@@ -233,6 +277,7 @@ async function runWorkflow(config) {
                 continue;
             }
             latestPlan = plan;
+            const scenarioStartTimeMs = Date.now();
             let retryAttempted = false;
             let uiNotes = "";
             const networkValidationNotes = [];
@@ -269,6 +314,7 @@ async function runWorkflow(config) {
                 }
             }
             const postDomSnapshot = await browser.getDOMSnapshot();
+            const scenarioEndTimeMs = Date.now();
             const uiChanged = postDomSnapshot !== initialDomSnapshot;
             const allNetworkLogs = await browser.getNetworkLogs();
             const allEndpoints = allNetworkLogs.map((entry) => entry.url);
@@ -296,7 +342,6 @@ async function runWorkflow(config) {
             if (uiNotes.trim().length > 0) {
                 actualParts.push(uiNotes.trim());
             }
-            let networkSummary;
             const apiLikeEntries = scenarioNetworkLogs.filter((entry) => {
                 if (!entry || typeof entry !== "object") {
                     return false;
@@ -304,6 +349,10 @@ async function runWorkflow(config) {
                 const e = entry;
                 const url = typeof e.url === "string" ? e.url : "";
                 const method = typeof e.method === "string" ? e.method.toUpperCase() : "";
+                const headerContentType = e.responseHeaders?.["content-type"];
+                const contentType = (typeof e.contentType === "string"
+                    ? e.contentType
+                    : headerContentType ?? "").toLowerCase();
                 if (!url) {
                     return false;
                 }
@@ -312,7 +361,7 @@ async function runWorkflow(config) {
                     url.startsWith("chrome:")) {
                     return false;
                 }
-                if (/\.(png|jpe?g|gif|svg|ico|css|js|woff2?|ttf)(\?|$)/i.test(url)) {
+                if (url.match(/\.(png|jpe?g|gif|svg|css|js|woff2?|ttf|ico|map)(\?|$)/i)) {
                     return false;
                 }
                 if (method === "POST" ||
@@ -321,25 +370,60 @@ async function runWorkflow(config) {
                     method === "DELETE") {
                     return true;
                 }
-                if (url.toLowerCase().includes("/api/")) {
+                if (contentType.includes("application/json")) {
+                    return true;
+                }
+                const lowerUrl = url.toLowerCase();
+                if (lowerUrl.includes("/api/") ||
+                    lowerUrl.includes("/graphql") ||
+                    lowerUrl.includes("/auth") ||
+                    lowerUrl.includes("/login")) {
                     return true;
                 }
                 return false;
             });
-            const primaryEntry = apiLikeEntries.length > 0
-                ? apiLikeEntries[apiLikeEntries.length - 1]
-                : undefined;
-            if (!primaryEntry) {
-                networkSummary = "No external API interaction detected.";
+            let metricsForScenario = null;
+            if (apiLikeEntries.length === 0) {
+                actualParts.push("No external API interaction detected.");
             }
             else {
-                const statusCode = typeof primaryEntry.status === "number" ? primaryEntry.status : null;
-                const responseTimeMs = typeof primaryEntry.durationMs === "number"
-                    ? primaryEntry.durationMs
-                    : null;
-                networkSummary = (0, networkSummary_1.generateNetworkSummary)(statusCode, responseTimeMs);
+                const networkData = apiLikeEntries.map((entry) => {
+                    const url = typeof entry.url === "string" ? entry.url : "";
+                    const method = typeof entry.method === "string"
+                        ? entry.method.toUpperCase()
+                        : "GET";
+                    const status = typeof entry.status === "number" ? entry.status : 0;
+                    const durationMs = typeof entry.durationMs === "number" &&
+                        Number.isFinite(entry.durationMs) &&
+                        entry.durationMs >= 0
+                        ? entry.durationMs
+                        : 0;
+                    const duration = durationMs;
+                    const startTime = 0;
+                    const endTime = duration;
+                    return {
+                        url,
+                        method,
+                        status,
+                        startTime,
+                        endTime,
+                        duration,
+                        resourceType: "xhr",
+                    };
+                });
+                const metrics = (0, networkAnalyzer_1.analyzeNetwork)(networkData);
+                metricsForScenario = metrics;
+                if (metrics.totalApiCalls === 0) {
+                    actualParts.push("No external API interaction detected.");
+                }
+                else {
+                    const networkSummary = `Network analysis: Total API calls: ${metrics.totalApiCalls}, ` +
+                        `Average latency: ${Math.round(metrics.averageLatency)} ms, ` +
+                        `Total API time: ${metrics.totalApiTime} ms, ` +
+                        `Unique API endpoints: ${metrics.apiCalls.length}.`;
+                    actualParts.push(networkSummary);
+                }
             }
-            actualParts.push(`Network observation: ${networkSummary}`);
             const actual = actualParts.join(" ");
             const pass = !stepExecutionFailed && uiChanged && networkValidationNotes.length === 0;
             const scenarioResult = {
@@ -351,6 +435,12 @@ async function runWorkflow(config) {
                 retryAttempted,
                 notes: uiNotes.trim(),
             };
+            if (metricsForScenario) {
+                const augmented = scenarioResult;
+                augmented.networkMetrics = metricsForScenario;
+                augmented.scenarioStartTimeMs = scenarioStartTimeMs;
+                augmented.scenarioEndTimeMs = scenarioEndTimeMs;
+            }
             scenarioResults.push(scenarioResult);
             if (Date.now() > deadlineMs) {
                 break;

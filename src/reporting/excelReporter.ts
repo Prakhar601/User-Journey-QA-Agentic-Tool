@@ -1,5 +1,7 @@
 import * as XLSX from "xlsx";
+import os from "os";
 import type { ScenarioResult } from "../core/types";
+import { getModelProvider } from "../ai/modelProvider";
 import type {
   ExecutionMetadata,
   ExecutionTool,
@@ -14,6 +16,21 @@ export interface ReportingContext {
   executionEnvironment: string;
   outputDirPath?: string;
   executionMetadata?: ExecutionMetadata;
+}
+
+interface ScenarioNetworkMetrics {
+  totalApiCalls?: number;
+  averageLatency?: number;
+  totalApiTime?: number;
+  apiCallSequence?: {
+    url: string;
+    durationMs: number;
+  }[];
+}
+
+interface ScenarioTimingMetadata {
+  scenarioStartTimeMs?: number;
+  scenarioEndTimeMs?: number;
 }
 
 function toBusinessLanguage(message: string): string {
@@ -325,6 +342,394 @@ function applyEnterpriseLayoutToWorksheet(
   }
 }
 
+function getSystemSpecs(): string {
+  try {
+    const cpu: string = os.cpus()?.[0]?.model ?? "Unknown CPU";
+    const ramGB: number = Math.round(
+      os.totalmem() / (1024 * 1024 * 1024)
+    );
+    const osName: string = `${os.type()} ${os.release()}`;
+
+    return `${osName} | ${cpu} | ${ramGB}GB RAM`;
+  } catch {
+    return "System information unavailable";
+  }
+}
+
+function deriveNetworkMetricsFromScenario(
+  result: ScenarioResult
+): {
+  totalApiCalls: number;
+  averageLatency: number;
+  totalApiTime: number;
+  apiCallSequence: {
+    url: string;
+    durationMs: number;
+  }[];
+} {
+  const anyResult = result as unknown as {
+    networkMetrics?: ScenarioNetworkMetrics;
+  };
+
+  const directMetrics = anyResult.networkMetrics;
+  if (
+    directMetrics &&
+    typeof directMetrics.totalApiCalls === "number" &&
+    typeof directMetrics.averageLatency === "number" &&
+    typeof directMetrics.totalApiTime === "number"
+  ) {
+    return {
+      totalApiCalls: directMetrics.totalApiCalls,
+      averageLatency: directMetrics.averageLatency,
+      totalApiTime: directMetrics.totalApiTime,
+      apiCallSequence: Array.isArray(directMetrics.apiCallSequence)
+        ? directMetrics.apiCallSequence
+        : [],
+    };
+  }
+
+  const actual: string = result.actual ?? "";
+  const lowerActual: string = actual.toLowerCase();
+
+  if (lowerActual.includes("no external api interaction detected")) {
+    return {
+      totalApiCalls: 0,
+      averageLatency: 0,
+      totalApiTime: 0,
+      apiCallSequence: [],
+    };
+  }
+
+  const networkSummaryRegex =
+    /Network analysis:\s*Total API calls:\s*(\d+),\s*Average latency:\s*(\d+)\s*ms,\s*Total API time:\s*(\d+)\s*ms/i;
+  const match = actual.match(networkSummaryRegex);
+
+  if (match) {
+    const totalApiCalls: number = Number(match[1]) || 0;
+    const averageLatency: number = Number(match[2]) || 0;
+    const totalApiTime: number = Number(match[3]) || 0;
+
+    return {
+      totalApiCalls,
+      averageLatency,
+      totalApiTime,
+      apiCallSequence: [],
+    };
+  }
+
+  return {
+    totalApiCalls: 0,
+    averageLatency: 0,
+    totalApiTime: 0,
+    apiCallSequence: [],
+  };
+}
+
+function generateAIAnalysis(
+  metrics: { totalApiCalls: number; averageLatency: number; totalApiTime: number },
+  uiRenderTime: number
+): string {
+  if (metrics.totalApiCalls === 0) {
+    return "No backend API activity detected";
+  }
+
+  if (metrics.averageLatency > 2000) {
+    return "Backend latency detected";
+  }
+
+  if (metrics.averageLatency >= 800) {
+    return "System slightly slow";
+  }
+
+  return "System performance healthy";
+}
+
+async function measureInternetSpeedMbps(): Promise<number | undefined> {
+  const url: string = (process.env.INTERNET_SPEED_TEST_URL ?? "").trim();
+  if (!url) {
+    return undefined;
+  }
+
+  try {
+    const start: number = Date.now();
+    const response: Response = await fetch(url);
+    if (!response.ok) {
+      return undefined;
+    }
+
+    const contentLengthHeader: string | null =
+      response.headers.get("content-length");
+
+    let bytes: number;
+    if (contentLengthHeader && /^\d+$/.test(contentLengthHeader)) {
+      bytes = Number(contentLengthHeader);
+      // Ensure body is fully read so the measurement is realistic.
+      await response.arrayBuffer();
+    } else {
+      const buffer = await response.arrayBuffer();
+      bytes = buffer.byteLength;
+    }
+
+    const durationSeconds: number = (Date.now() - start) / 1000;
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+      return undefined;
+    }
+
+    const megabits: number = (bytes * 8) / 1_000_000;
+    const mbps: number = megabits / durationSeconds;
+
+    if (!Number.isFinite(mbps) || mbps <= 0) {
+      return undefined;
+    }
+
+    return Math.round(mbps);
+  } catch {
+    return undefined;
+  }
+}
+
+async function filterRelevantApisWithLLM(
+  workflowDescription: string,
+  capturedApiUrls: string[]
+): Promise<string[] | undefined> {
+  if (!capturedApiUrls || capturedApiUrls.length === 0) {
+    return [];
+  }
+
+  const provider = getModelProvider();
+
+  const limitedUrls: string[] =
+    capturedApiUrls.length > 30
+      ? capturedApiUrls.slice(capturedApiUrls.length - 30)
+      : capturedApiUrls.slice();
+
+  const promptParts: string[] = [];
+  promptParts.push(
+    "You are helping analyze network API calls for an end-to-end workflow test."
+  );
+  promptParts.push("");
+  promptParts.push("Workflow description:");
+  promptParts.push(workflowDescription || "Unknown workflow");
+  promptParts.push("");
+  promptParts.push("Captured API URLs (in chronological order):");
+  promptParts.push(JSON.stringify(limitedUrls, null, 2));
+  promptParts.push("");
+  promptParts.push(
+    "From the list above, select only the API URLs that are directly relevant to executing the workflow."
+  );
+  promptParts.push("Rules:");
+  promptParts.push("- Only select values that appear in the Captured API URLs list.");
+  promptParts.push("- Do not invent new URLs.");
+  promptParts.push("- Preserve the original order of any URLs you select.");
+  promptParts.push("- You may drop analytics, logging, telemetry, or unrelated endpoints.");
+  promptParts.push("- Duplicates are allowed if they appear multiple times in the input.");
+  promptParts.push("- Do not reorder or deduplicate the selected URLs.");
+  promptParts.push("- Respond with a JSON array ONLY (no explanation).");
+
+  const prompt: string = promptParts.join("\n");
+
+  try {
+    const raw = await provider.generateResponse(
+      [{ role: "user", content: prompt }],
+      {
+        model:
+          process.env.LLM_MODEL ??
+          process.env.GITHUB_MODEL ??
+          "openai/gpt-4.1-mini",
+      }
+    );
+
+    if (!raw || typeof raw !== "string") {
+      return undefined;
+    }
+
+    let text = raw.trim();
+    const firstBracket = text.indexOf("[");
+    const lastBracket = text.lastIndexOf("]");
+    if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+      text = text.slice(firstBracket, lastBracket + 1);
+    }
+
+    const parsed: unknown = JSON.parse(text);
+    if (!Array.isArray(parsed)) {
+      return undefined;
+    }
+
+    const result: string[] = [];
+    for (const item of parsed) {
+      if (typeof item === "string" && item.trim().length > 0) {
+        result.push(item);
+      }
+    }
+
+    return result;
+  } catch {
+    return undefined;
+  }
+}
+
+async function addSystemAnalysisSheet(
+  workbook: XLSX.WorkBook,
+  scenarioResults: ScenarioResult[],
+  options: { internetSpeedMbps?: number }
+): Promise<void> {
+  if (!scenarioResults || scenarioResults.length === 0) {
+    return;
+  }
+
+  const systemSpecs: string = getSystemSpecs();
+   const internetSpeedValue: string =
+    typeof options.internetSpeedMbps === "number" &&
+    Number.isFinite(options.internetSpeedMbps) &&
+    options.internetSpeedMbps > 0
+      ? `${options.internetSpeedMbps} Mbps`
+      : "Unknown";
+
+  const headerRow: string[] = [
+    "Scenario",
+    "API Calls",
+    "Avg Latency (ms)",
+    "Total API Time (ms)",
+    "UI Render Time (ms)",
+    "System Specs",
+    "Internet Speed",
+    "API Waterfall",
+    "AI Analysis",
+  ];
+
+  const dataRows: (string | number | undefined)[][] = [];
+
+  for (const result of scenarioResults) {
+    const metrics = deriveNetworkMetricsFromScenario(result);
+
+    const anyResult = result as unknown as ScenarioTimingMetadata & {
+      networkMetrics?: ScenarioNetworkMetrics;
+    };
+
+    const sequence: { url: string; durationMs: number }[] =
+      (anyResult.networkMetrics?.apiCallSequence &&
+        Array.isArray(anyResult.networkMetrics.apiCallSequence)
+        ? anyResult.networkMetrics.apiCallSequence
+        : metrics.apiCallSequence) ?? [];
+
+    const recentSequence =
+      sequence.length > 30
+        ? sequence.slice(sequence.length - 30)
+        : sequence.slice();
+
+    const capturedApiUrls: string[] = recentSequence.map((c) => c.url);
+
+    let relevantUrls: string[] | undefined;
+    if (capturedApiUrls.length > 0) {
+      const workflowDescription: string =
+        result.expected && result.expected.trim().length > 0
+          ? result.expected
+          : result.scenarioName;
+
+      relevantUrls = await filterRelevantApisWithLLM(
+        workflowDescription,
+        capturedApiUrls
+      );
+    }
+
+    const relevantUrlSet: Set<string> = new Set(
+      (relevantUrls && relevantUrls.length > 0
+        ? relevantUrls
+        : capturedApiUrls
+      ).filter((u) => typeof u === "string" && u.length > 0)
+    );
+
+    const relevantCalls = recentSequence.filter((call) =>
+      relevantUrlSet.has(call.url)
+    );
+
+    const totalApiCallsRelevant: number = relevantCalls.length;
+
+    let totalApiTimeRelevant: number = 0;
+    for (const call of relevantCalls) {
+      if (
+        typeof call.durationMs === "number" &&
+        Number.isFinite(call.durationMs) &&
+        call.durationMs >= 0
+      ) {
+        totalApiTimeRelevant += call.durationMs;
+      }
+    }
+
+    const averageLatencyRelevant: number =
+      totalApiCallsRelevant > 0
+        ? totalApiTimeRelevant / totalApiCallsRelevant
+        : 0;
+
+    let scenarioExecutionDurationMs: number = 0;
+    if (
+      typeof anyResult.scenarioStartTimeMs === "number" &&
+      typeof anyResult.scenarioEndTimeMs === "number" &&
+      Number.isFinite(anyResult.scenarioStartTimeMs) &&
+      Number.isFinite(anyResult.scenarioEndTimeMs) &&
+      anyResult.scenarioEndTimeMs >= anyResult.scenarioStartTimeMs
+    ) {
+      scenarioExecutionDurationMs =
+        anyResult.scenarioEndTimeMs - anyResult.scenarioStartTimeMs;
+    }
+
+    const uiRenderTime: number =
+      scenarioExecutionDurationMs > totalApiTimeRelevant
+        ? scenarioExecutionDurationMs - totalApiTimeRelevant
+        : 0;
+
+    const avgLatencyRounded: number = Math.round(averageLatencyRelevant);
+
+    const aiAnalysis: string = generateAIAnalysis(
+      {
+        totalApiCalls: totalApiCallsRelevant,
+        averageLatency: averageLatencyRelevant,
+        totalApiTime: totalApiTimeRelevant,
+      },
+      uiRenderTime
+    );
+
+    const apiWaterfall: string =
+      relevantCalls.length > 0
+        ? relevantCalls.map((call) => call.url).join("\n")
+        : "";
+
+    dataRows.push([
+      result.scenarioName,
+      totalApiCallsRelevant,
+      avgLatencyRounded,
+      Math.round(totalApiTimeRelevant),
+      uiRenderTime,
+      systemSpecs,
+      internetSpeedValue,
+      apiWaterfall,
+      aiAnalysis,
+    ]);
+  }
+
+  const rows: (string | number | undefined)[][] = [headerRow, ...dataRows];
+
+  const sheet: XLSX.WorkSheet = XLSX.utils.aoa_to_sheet(rows);
+
+  applyEnterpriseLayoutToWorksheet(
+    sheet,
+    [
+      35, // Scenario
+      12, // API Calls
+      18, // Avg Latency (ms)
+      20, // Total API Time (ms)
+      22, // UI Render Time (ms)
+      50, // System Specs
+      18, // Internet Speed
+      60, // API Waterfall
+      40, // AI Analysis
+    ],
+    false
+  );
+
+  XLSX.utils.book_append_sheet(workbook, sheet, "System Analysis");
+}
+
 function addSummarySheet(
   workbook: XLSX.WorkBook,
   reports: ScenarioReport[],
@@ -586,9 +991,9 @@ export async function writeTestResultsExcel(
         : toBusinessLanguage(report.expectedOutcome ?? "");
 
     const actualOutcomeText =
-      report.result === "Pass"
-        ? "The workflow completed as expected."
-        : toBusinessLanguage(report.actualOutcome ?? "");
+      report.actualOutcome && report.actualOutcome.trim().length > 0
+        ? toBusinessLanguage(report.actualOutcome)
+        : "The workflow completed as expected.";
 
     const failureReasonText =
       report.failureReason && report.failureReason.trim().length > 0
@@ -627,6 +1032,12 @@ export async function writeTestResultsExcel(
   // Executive Summary sheet (second sheet) with high-level metrics
   addExecutiveSummarySheet(workbook, reports, context);
 
+  const internetSpeedMbps: number | undefined = await measureInternetSpeedMbps();
+
+  await addSystemAnalysisSheet(workbook, scenarioResults, {
+    internetSpeedMbps,
+  });
+
   addSummarySheet(workbook, reports, context);
 
   const { testResultsXlsxPath } = await ensureEnterpriseOutputStructure({
@@ -661,9 +1072,9 @@ export async function writeRegressionReportExcel(
         : toBusinessLanguage(report.expectedOutcome ?? "");
 
     const actualOutcomeText =
-      report.result === "Pass"
-        ? "The workflow completed as expected."
-        : toBusinessLanguage(report.actualOutcome ?? "");
+      report.actualOutcome && report.actualOutcome.trim().length > 0
+        ? toBusinessLanguage(report.actualOutcome)
+        : "The workflow completed as expected.";
 
     const failureReasonText =
       report.failureReason && report.failureReason.trim().length > 0
@@ -711,6 +1122,12 @@ export async function writeRegressionReportExcel(
 
   // Executive Summary sheet (second sheet) with high-level metrics
   addExecutiveSummarySheet(workbook, reports, context);
+
+  const internetSpeedMbps: number | undefined = await measureInternetSpeedMbps();
+
+  await addSystemAnalysisSheet(workbook, scenarioResults, {
+    internetSpeedMbps,
+  });
 
   addSummarySheet(workbook, reports, context);
 

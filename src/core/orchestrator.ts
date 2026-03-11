@@ -12,7 +12,7 @@ import { SeleniumBrowserController } from "../browser/seleniumBrowserController"
 import { createPlan } from "../agents/plannerAgent";
 import { runPythonAgent, PythonBrowserState } from "../ai/mcpClient";
 import { callModel } from "../ai/githubModelsClient";
-import { generateNetworkSummary } from "../reporting/networkSummary";
+import { analyzeNetwork } from "../browser/networkAnalyzer";
 import { ensureEnterpriseOutputStructure } from "../reporting/outputManager";
 
 type AutomationToolId = "playwright" | "selenium";
@@ -109,6 +109,8 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
           await browser.getNetworkLogs()
         ).length;
 
+        const scenarioStartTimeMs: number = Date.now();
+
         const adaptiveResult: AdaptiveExecutionResult =
           await adaptiveExecutionLoop({
             browser,
@@ -133,6 +135,7 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
         };
 
         const postDomSnapshot: string = await browser.getDOMSnapshot();
+        const scenarioEndTimeMs: number = Date.now();
         const uiChanged: boolean = postDomSnapshot !== initialDomSnapshot;
 
         const allNetworkLogs = await browser.getNetworkLogs();
@@ -172,13 +175,12 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
           actualParts.push(adaptiveResult.uiNotes.trim());
         }
 
-        let networkSummary: string;
-
         type ScenarioNetworkLogEntry = {
           url?: string;
           method?: string;
           status?: number | null;
           durationMs?: number | null;
+          contentType?: string;
         };
 
         const apiLikeEntries: ScenarioNetworkLogEntry[] =
@@ -186,10 +188,21 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
             if (!entry || typeof entry !== "object") {
               return false;
             }
-            const e = entry as ScenarioNetworkLogEntry;
+
+            const e = entry as ScenarioNetworkLogEntry & {
+              responseHeaders?: Record<string, string>;
+            };
+
             const url: string = typeof e.url === "string" ? e.url : "";
             const method: string =
               typeof e.method === "string" ? e.method.toUpperCase() : "";
+            const headerContentType: string | undefined =
+              e.responseHeaders?.["content-type"];
+            const contentType: string = (
+              typeof e.contentType === "string"
+                ? e.contentType
+                : headerContentType ?? ""
+            ).toLowerCase();
 
             if (!url) {
               return false;
@@ -204,7 +217,9 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
             }
 
             if (
-              /\.(png|jpe?g|gif|svg|ico|css|js|woff2?|ttf)(\?|$)/i.test(url)
+              url.match(
+                /\.(png|jpe?g|gif|svg|css|js|woff2?|ttf|ico|map)(\?|$)/i
+              )
             ) {
               return false;
             }
@@ -218,33 +233,74 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
               return true;
             }
 
-            if (url.toLowerCase().includes("/api/")) {
+            if (contentType.includes("application/json")) {
+              return true;
+            }
+
+            const lowerUrl = url.toLowerCase();
+            if (
+              lowerUrl.includes("/api/") ||
+              lowerUrl.includes("/graphql") ||
+              lowerUrl.includes("/auth") ||
+              lowerUrl.includes("/login")
+            ) {
               return true;
             }
 
             return false;
           });
 
-        const primaryEntry: ScenarioNetworkLogEntry | undefined =
-          apiLikeEntries.length > 0
-            ? apiLikeEntries[apiLikeEntries.length - 1]
-            : undefined;
+        let metricsForScenario: ReturnType<typeof analyzeNetwork> | null = null;
 
-        if (!primaryEntry) {
-          networkSummary = "No external API interaction detected.";
+        if (apiLikeEntries.length === 0) {
+          actualParts.push("No external API interaction detected.");
         } else {
-          const statusCode: number | null =
-            typeof primaryEntry.status === "number"
-              ? primaryEntry.status
-              : null;
-          const responseTimeMs: number | null =
-            typeof primaryEntry.durationMs === "number"
-              ? primaryEntry.durationMs
-              : null;
-          networkSummary = generateNetworkSummary(statusCode, responseTimeMs);
-        }
+          const networkData = apiLikeEntries.map((entry) => {
+            const url: string =
+              typeof entry.url === "string" ? entry.url : "";
+            const method: string =
+              typeof entry.method === "string"
+                ? entry.method.toUpperCase()
+                : "GET";
+            const status: number =
+              typeof entry.status === "number" ? entry.status : 0;
+            const durationMs: number =
+              typeof entry.durationMs === "number" &&
+              Number.isFinite(entry.durationMs) &&
+              entry.durationMs >= 0
+                ? entry.durationMs
+                : 0;
 
-        actualParts.push(`Network observation: ${networkSummary}`);
+            const duration: number = durationMs;
+            const startTime: number = 0;
+            const endTime: number = duration;
+
+            return {
+              url,
+              method,
+              status,
+              startTime,
+              endTime,
+              duration,
+              resourceType: "xhr",
+            };
+          });
+
+          const metrics = analyzeNetwork(networkData);
+          metricsForScenario = metrics;
+
+          if (metrics.totalApiCalls === 0) {
+            actualParts.push("No external API interaction detected.");
+          } else {
+            const networkSummary =
+              `Network analysis: Total API calls: ${metrics.totalApiCalls}, ` +
+              `Average latency: ${Math.round(metrics.averageLatency)} ms, ` +
+              `Total API time: ${metrics.totalApiTime} ms, ` +
+              `Unique API endpoints: ${metrics.apiCalls.length}.`;
+
+            actualParts.push(networkSummary);
+          }
+        }
 
         const actual: string = actualParts.join(" ");
 
@@ -266,6 +322,21 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
               ? adaptiveResult.screenshots.slice()
               : undefined,
         };
+
+        if (metricsForScenario) {
+          const augmented = scenarioResult as unknown as {
+            networkMetrics?: {
+              totalApiCalls: number;
+              averageLatency: number;
+              totalApiTime: number;
+            };
+            scenarioStartTimeMs?: number;
+            scenarioEndTimeMs?: number;
+          };
+          augmented.networkMetrics = metricsForScenario;
+          augmented.scenarioStartTimeMs = scenarioStartTimeMs;
+          augmented.scenarioEndTimeMs = scenarioEndTimeMs;
+        }
 
         scenarioResults.push(scenarioResult);
 
@@ -313,6 +384,8 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
       }
       latestPlan = plan;
 
+      const scenarioStartTimeMs: number = Date.now();
+
       let retryAttempted: boolean = false;
       let uiNotes: string = "";
       const networkValidationNotes: string[] = [];
@@ -357,6 +430,7 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
       }
 
       const postDomSnapshot: string = await browser.getDOMSnapshot();
+      const scenarioEndTimeMs: number = Date.now();
       const uiChanged: boolean = postDomSnapshot !== initialDomSnapshot;
 
       const allNetworkLogs = await browser.getNetworkLogs();
@@ -396,13 +470,12 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
         actualParts.push(uiNotes.trim());
       }
 
-      let networkSummary: string;
-
       type ScenarioNetworkLogEntry = {
         url?: string;
         method?: string;
         status?: number | null;
         durationMs?: number | null;
+        contentType?: string;
       };
 
       const apiLikeEntries: ScenarioNetworkLogEntry[] =
@@ -410,10 +483,21 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
           if (!entry || typeof entry !== "object") {
             return false;
           }
-          const e = entry as ScenarioNetworkLogEntry;
+
+          const e = entry as ScenarioNetworkLogEntry & {
+            responseHeaders?: Record<string, string>;
+          };
+
           const url: string = typeof e.url === "string" ? e.url : "";
           const method: string =
             typeof e.method === "string" ? e.method.toUpperCase() : "";
+          const headerContentType: string | undefined =
+            e.responseHeaders?.["content-type"];
+          const contentType: string = (
+            typeof e.contentType === "string"
+              ? e.contentType
+              : headerContentType ?? ""
+          ).toLowerCase();
 
           if (!url) {
             return false;
@@ -427,7 +511,11 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
             return false;
           }
 
-          if (/\.(png|jpe?g|gif|svg|ico|css|js|woff2?|ttf)(\?|$)/i.test(url)) {
+          if (
+            url.match(
+              /\.(png|jpe?g|gif|svg|css|js|woff2?|ttf|ico|map)(\?|$)/i
+            )
+          ) {
             return false;
           }
 
@@ -440,31 +528,73 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
             return true;
           }
 
-          if (url.toLowerCase().includes("/api/")) {
+          if (contentType.includes("application/json")) {
+            return true;
+          }
+
+          const lowerUrl = url.toLowerCase();
+          if (
+            lowerUrl.includes("/api/") ||
+            lowerUrl.includes("/graphql") ||
+            lowerUrl.includes("/auth") ||
+            lowerUrl.includes("/login")
+          ) {
             return true;
           }
 
           return false;
         });
 
-      const primaryEntry: ScenarioNetworkLogEntry | undefined =
-        apiLikeEntries.length > 0
-          ? apiLikeEntries[apiLikeEntries.length - 1]
-          : undefined;
+      let metricsForScenario: ReturnType<typeof analyzeNetwork> | null = null;
 
-      if (!primaryEntry) {
-        networkSummary = "No external API interaction detected.";
+      if (apiLikeEntries.length === 0) {
+        actualParts.push("No external API interaction detected.");
       } else {
-        const statusCode: number | null =
-          typeof primaryEntry.status === "number" ? primaryEntry.status : null;
-        const responseTimeMs: number | null =
-          typeof primaryEntry.durationMs === "number"
-            ? primaryEntry.durationMs
-            : null;
-        networkSummary = generateNetworkSummary(statusCode, responseTimeMs);
-      }
+        const networkData = apiLikeEntries.map((entry) => {
+          const url: string = typeof entry.url === "string" ? entry.url : "";
+          const method: string =
+            typeof entry.method === "string"
+              ? entry.method.toUpperCase()
+              : "GET";
+          const status: number =
+            typeof entry.status === "number" ? entry.status : 0;
+          const durationMs: number =
+            typeof entry.durationMs === "number" &&
+            Number.isFinite(entry.durationMs) &&
+            entry.durationMs >= 0
+              ? entry.durationMs
+              : 0;
 
-      actualParts.push(`Network observation: ${networkSummary}`);
+          const duration: number = durationMs;
+          const startTime: number = 0;
+          const endTime: number = duration;
+
+          return {
+            url,
+            method,
+            status,
+            startTime,
+            endTime,
+            duration,
+            resourceType: "xhr",
+          };
+        });
+
+        const metrics = analyzeNetwork(networkData);
+        metricsForScenario = metrics;
+
+        if (metrics.totalApiCalls === 0) {
+          actualParts.push("No external API interaction detected.");
+        } else {
+          const networkSummary =
+            `Network analysis: Total API calls: ${metrics.totalApiCalls}, ` +
+            `Average latency: ${Math.round(metrics.averageLatency)} ms, ` +
+            `Total API time: ${metrics.totalApiTime} ms, ` +
+            `Unique API endpoints: ${metrics.apiCalls.length}.`;
+
+          actualParts.push(networkSummary);
+        }
+      }
 
       const actual: string = actualParts.join(" ");
 
@@ -480,6 +610,21 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
         retryAttempted,
         notes: uiNotes.trim(),
       };
+
+      if (metricsForScenario) {
+        const augmented = scenarioResult as unknown as {
+          networkMetrics?: {
+            totalApiCalls: number;
+            averageLatency: number;
+            totalApiTime: number;
+          };
+          scenarioStartTimeMs?: number;
+          scenarioEndTimeMs?: number;
+        };
+        augmented.networkMetrics = metricsForScenario;
+        augmented.scenarioStartTimeMs = scenarioStartTimeMs;
+        augmented.scenarioEndTimeMs = scenarioEndTimeMs;
+      }
 
       scenarioResults.push(scenarioResult);
 

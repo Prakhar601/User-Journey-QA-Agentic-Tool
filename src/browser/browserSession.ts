@@ -113,15 +113,6 @@ function attachNetworkListeners(): void {
   context.on("request", (request: Request) => {
     const startedAt: number = Date.now();
     requestStartTimes.set(request, startedAt);
-
-    const logEntry: NetworkLogEntry = {
-      url: request.url(),
-      method: request.method(),
-      status: null,
-      durationMs: null,
-    };
-
-    networkLogs.push(logEntry);
   });
 
   context.on("response", async (response: Response) => {
@@ -133,6 +124,10 @@ function attachNetworkListeners(): void {
     const startedAt: number | undefined = requestStartTimes.get(request);
     const durationMs: number | null =
       typeof startedAt === "number" ? Date.now() - startedAt : null;
+
+    if (typeof startedAt === "number") {
+      requestStartTimes.delete(request);
+    }
 
     const logEntry: NetworkLogEntry = {
       url,
