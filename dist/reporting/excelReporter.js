@@ -42,6 +42,25 @@ const XLSX = __importStar(require("xlsx"));
 const os_1 = __importDefault(require("os"));
 const modelProvider_1 = require("../ai/modelProvider");
 const outputManager_1 = require("./outputManager");
+function isTelemetryUrl(url) {
+    const lower = (url ?? "").toLowerCase();
+    if (!lower)
+        return false;
+    const telemetryKeywords = [
+        "analytics",
+        "metrics",
+        "telemetry",
+        "events",
+        "tracking",
+        "sentry",
+        "segment",
+        "datadog",
+        "backtrace",
+        "monitor",
+        "log",
+    ];
+    return telemetryKeywords.some((keyword) => lower.includes(keyword));
+}
 function toBusinessLanguage(message) {
     const trimmed = (message ?? "").trim();
     if (!trimmed) {
@@ -370,8 +389,12 @@ function generateAIAnalysis(metrics, uiRenderTime) {
     }
     return "System performance healthy";
 }
+const DEFAULT_INTERNET_SPEED_TEST_URL = "https://speed.cloudflare.com/__down?bytes=5000000";
 async function measureInternetSpeedMbps() {
-    const url = (process.env.INTERNET_SPEED_TEST_URL ?? "").trim();
+    const envUrlRaw = process.env.INTERNET_SPEED_TEST_URL;
+    const url = envUrlRaw === undefined
+        ? DEFAULT_INTERNET_SPEED_TEST_URL
+        : String(envUrlRaw).trim();
     if (!url) {
         return undefined;
     }
@@ -412,9 +435,13 @@ async function filterRelevantApisWithLLM(workflowDescription, capturedApiUrls) {
         return [];
     }
     const provider = (0, modelProvider_1.getModelProvider)();
-    const limitedUrls = capturedApiUrls.length > 30
-        ? capturedApiUrls.slice(capturedApiUrls.length - 30)
-        : capturedApiUrls.slice();
+    const telemetryFilteredUrls = capturedApiUrls.filter((url) => typeof url === "string" && url.trim().length > 0 && !isTelemetryUrl(url));
+    if (telemetryFilteredUrls.length === 0) {
+        return [];
+    }
+    const limitedUrls = telemetryFilteredUrls.length > 30
+        ? telemetryFilteredUrls.slice(telemetryFilteredUrls.length - 30)
+        : telemetryFilteredUrls.slice();
     const promptParts = [];
     promptParts.push("You are helping analyze network API calls for an end-to-end workflow test.");
     promptParts.push("");
@@ -451,18 +478,25 @@ async function filterRelevantApisWithLLM(workflowDescription, capturedApiUrls) {
         }
         const parsed = JSON.parse(text);
         if (!Array.isArray(parsed)) {
-            return undefined;
+            return telemetryFilteredUrls;
         }
-        const result = [];
+        const parsedStrings = [];
         for (const item of parsed) {
             if (typeof item === "string" && item.trim().length > 0) {
-                result.push(item);
+                parsedStrings.push(item);
             }
         }
-        return result;
+        const normalizedResult = telemetryFilteredUrls.filter((url) => parsedStrings.includes(url));
+        if (!normalizedResult ||
+            normalizedResult.length === 0 ||
+            normalizedResult.length <
+                Math.max(1, Math.floor(telemetryFilteredUrls.length * 0.2))) {
+            return telemetryFilteredUrls;
+        }
+        return normalizedResult;
     }
     catch {
-        return undefined;
+        return telemetryFilteredUrls;
     }
 }
 async function addSystemAnalysisSheet(workbook, scenarioResults, options) {
@@ -497,7 +531,9 @@ async function addSystemAnalysisSheet(workbook, scenarioResults, options) {
         const recentSequence = sequence.length > 30
             ? sequence.slice(sequence.length - 30)
             : sequence.slice();
-        const capturedApiUrls = recentSequence.map((c) => c.url);
+        const capturedApiUrls = recentSequence
+            .map((c) => c.url)
+            .filter((u) => typeof u === "string" && u.length > 0);
         let relevantUrls;
         if (capturedApiUrls.length > 0) {
             const workflowDescription = result.expected && result.expected.trim().length > 0
@@ -505,10 +541,16 @@ async function addSystemAnalysisSheet(workbook, scenarioResults, options) {
                 : result.scenarioName;
             relevantUrls = await filterRelevantApisWithLLM(workflowDescription, capturedApiUrls);
         }
-        const relevantUrlSet = new Set((relevantUrls && relevantUrls.length > 0
+        const fallbackTelemetryFiltered = capturedApiUrls.filter((url) => !isTelemetryUrl(url));
+        const finalRelevantUrls = relevantUrls && relevantUrls.length > 0
             ? relevantUrls
-            : capturedApiUrls).filter((u) => typeof u === "string" && u.length > 0));
-        const relevantCalls = recentSequence.filter((call) => relevantUrlSet.has(call.url));
+            : fallbackTelemetryFiltered.length > 0
+                ? fallbackTelemetryFiltered
+                : capturedApiUrls;
+        const relevantUrlSet = new Set(finalRelevantUrls);
+        const relevantCalls = recentSequence.filter((call) => typeof call.url === "string" &&
+            call.url.length > 0 &&
+            relevantUrlSet.has(call.url));
         const totalApiCallsRelevant = relevantCalls.length;
         let totalApiTimeRelevant = 0;
         for (const call of relevantCalls) {

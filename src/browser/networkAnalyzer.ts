@@ -81,25 +81,33 @@ export function analyzeNetwork(
 
   for (const entry of apiEntries) {
     if (!entry) continue;
+    const url: string = typeof entry.url === "string" ? entry.url : "";
 
-    if (typeof entry.url === "string" && entry.url.trim().length > 0) {
-      apiUrlSet.add(entry.url);
+    if (url.trim().length > 0) {
+      apiUrlSet.add(url);
     }
 
     const hasValidDuration: boolean =
       typeof entry.duration === "number" && Number.isFinite(entry.duration);
 
-    const duration: number = hasValidDuration
-      ? entry.duration
-      : entry.endTime - entry.startTime;
+    let duration: number;
+    if (hasValidDuration) {
+      duration = entry.duration;
+    } else {
+      const fallbackDuration: number = entry.endTime - entry.startTime;
+      duration = Number.isFinite(fallbackDuration) && fallbackDuration >= 0
+        ? fallbackDuration
+        : 0;
+    }
 
     if (Number.isFinite(duration) && duration >= 0) {
       totalApiTime += duration;
-      apiCallSequence.push({
-        url: entry.url,
-        durationMs: duration,
-      });
     }
+
+    apiCallSequence.push({
+      url,
+      durationMs: Number.isFinite(duration) && duration >= 0 ? duration : 0,
+    });
   }
 
   const averageLatency: number =

@@ -33,6 +33,27 @@ interface ScenarioTimingMetadata {
   scenarioEndTimeMs?: number;
 }
 
+function isTelemetryUrl(url: string): boolean {
+  const lower = (url ?? "").toLowerCase();
+  if (!lower) return false;
+
+  const telemetryKeywords: string[] = [
+    "analytics",
+    "metrics",
+    "telemetry",
+    "events",
+    "tracking",
+    "sentry",
+    "segment",
+    "datadog",
+    "backtrace",
+    "monitor",
+    "log",
+  ];
+
+  return telemetryKeywords.some((keyword) => lower.includes(keyword));
+}
+
 function toBusinessLanguage(message: string): string {
   const trimmed = (message ?? "").trim();
   if (!trimmed) {
@@ -444,8 +465,17 @@ function generateAIAnalysis(
   return "System performance healthy";
 }
 
+const DEFAULT_INTERNET_SPEED_TEST_URL =
+  "https://speed.cloudflare.com/__down?bytes=5000000";
+
 async function measureInternetSpeedMbps(): Promise<number | undefined> {
-  const url: string = (process.env.INTERNET_SPEED_TEST_URL ?? "").trim();
+  const envUrlRaw = process.env.INTERNET_SPEED_TEST_URL;
+
+  const url: string =
+    envUrlRaw === undefined
+      ? DEFAULT_INTERNET_SPEED_TEST_URL
+      : String(envUrlRaw).trim();
+
   if (!url) {
     return undefined;
   }
@@ -498,10 +528,18 @@ async function filterRelevantApisWithLLM(
 
   const provider = getModelProvider();
 
+  const telemetryFilteredUrls: string[] = capturedApiUrls.filter(
+    (url) => typeof url === "string" && url.trim().length > 0 && !isTelemetryUrl(url)
+  );
+
+  if (telemetryFilteredUrls.length === 0) {
+    return [];
+  }
+
   const limitedUrls: string[] =
-    capturedApiUrls.length > 30
-      ? capturedApiUrls.slice(capturedApiUrls.length - 30)
-      : capturedApiUrls.slice();
+    telemetryFilteredUrls.length > 30
+      ? telemetryFilteredUrls.slice(telemetryFilteredUrls.length - 30)
+      : telemetryFilteredUrls.slice();
 
   const promptParts: string[] = [];
   promptParts.push(
@@ -552,19 +590,32 @@ async function filterRelevantApisWithLLM(
 
     const parsed: unknown = JSON.parse(text);
     if (!Array.isArray(parsed)) {
-      return undefined;
+      return telemetryFilteredUrls;
     }
 
-    const result: string[] = [];
+    const parsedStrings: string[] = [];
     for (const item of parsed) {
       if (typeof item === "string" && item.trim().length > 0) {
-        result.push(item);
+        parsedStrings.push(item);
       }
     }
 
-    return result;
+    const normalizedResult: string[] = telemetryFilteredUrls.filter((url) =>
+      parsedStrings.includes(url)
+    );
+
+    if (
+      !normalizedResult ||
+      normalizedResult.length === 0 ||
+      normalizedResult.length <
+        Math.max(1, Math.floor(telemetryFilteredUrls.length * 0.2))
+    ) {
+      return telemetryFilteredUrls;
+    }
+
+    return normalizedResult;
   } catch {
-    return undefined;
+    return telemetryFilteredUrls;
   }
 }
 
@@ -617,7 +668,9 @@ async function addSystemAnalysisSheet(
         ? sequence.slice(sequence.length - 30)
         : sequence.slice();
 
-    const capturedApiUrls: string[] = recentSequence.map((c) => c.url);
+    const capturedApiUrls: string[] = recentSequence
+      .map((c) => c.url)
+      .filter((u) => typeof u === "string" && u.length > 0);
 
     let relevantUrls: string[] | undefined;
     if (capturedApiUrls.length > 0) {
@@ -632,15 +685,24 @@ async function addSystemAnalysisSheet(
       );
     }
 
-    const relevantUrlSet: Set<string> = new Set(
-      (relevantUrls && relevantUrls.length > 0
-        ? relevantUrls
-        : capturedApiUrls
-      ).filter((u) => typeof u === "string" && u.length > 0)
+    const fallbackTelemetryFiltered: string[] = capturedApiUrls.filter(
+      (url) => !isTelemetryUrl(url)
     );
 
-    const relevantCalls = recentSequence.filter((call) =>
-      relevantUrlSet.has(call.url)
+    const finalRelevantUrls: string[] =
+      relevantUrls && relevantUrls.length > 0
+        ? relevantUrls
+        : fallbackTelemetryFiltered.length > 0
+        ? fallbackTelemetryFiltered
+        : capturedApiUrls;
+
+    const relevantUrlSet: Set<string> = new Set(finalRelevantUrls);
+
+    const relevantCalls = recentSequence.filter(
+      (call) =>
+        typeof call.url === "string" &&
+        call.url.length > 0 &&
+        relevantUrlSet.has(call.url)
     );
 
     const totalApiCallsRelevant: number = relevantCalls.length;
