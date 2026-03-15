@@ -145,6 +145,111 @@ class SeleniumBrowserController {
             this.driver = null;
         }
     }
+    /**
+     * Clears an input field and types the given value into it.
+     * Equivalent to browserController.fill() — clear then sendKeys.
+     */
+    async fill(selector, value) {
+        const driver = this.driver;
+        if (driver === null) {
+            throw new Error("Browser not launched. Call launchBrowser() first.");
+        }
+        const el = await driver.wait(selenium_webdriver_1.until.elementLocated(selenium_webdriver_1.By.css(selector)), this.timeoutMs);
+        await driver.wait(selenium_webdriver_1.until.elementIsVisible(el), this.timeoutMs).catch(() => undefined);
+        await el.clear().catch(() => undefined);
+        await el.sendKeys(value);
+    }
+    /**
+     * Selects an option in a <select> element by its visible text label.
+     * Falls back to matching by value attribute when no label match is found.
+     */
+    async selectOption(selector, value) {
+        const driver = this.driver;
+        if (driver === null) {
+            throw new Error("Browser not launched. Call launchBrowser() first.");
+        }
+        const el = await driver.wait(selenium_webdriver_1.until.elementLocated(selenium_webdriver_1.By.css(selector)), this.timeoutMs);
+        await driver.wait(selenium_webdriver_1.until.elementIsVisible(el), this.timeoutMs).catch(() => undefined);
+        // Try to find an <option> whose visible text matches, then click it.
+        // Fall back to finding by value attribute.
+        const options = await el.findElements(selenium_webdriver_1.By.css("option"));
+        let matched = false;
+        for (const option of options) {
+            try {
+                const text = await option.getText();
+                if (text.trim() === value.trim()) {
+                    await option.click();
+                    matched = true;
+                    break;
+                }
+            }
+            catch {
+                // skip unreadable options
+            }
+        }
+        if (!matched) {
+            // Fall back: select by value attribute via JavaScript.
+            await driver.executeScript(`
+        const sel = arguments[0];
+        const val = arguments[1];
+        for (const opt of sel.options) {
+          if (opt.value === val || opt.text === val) {
+            opt.selected = true;
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            break;
+          }
+        }
+        `, el, value);
+        }
+    }
+    /**
+     * Moves the pointer over the element identified by the CSS selector.
+     * Uses the WebDriver Actions API to perform the hover.
+     */
+    async hover(selector) {
+        const driver = this.driver;
+        if (driver === null) {
+            throw new Error("Browser not launched. Call launchBrowser() first.");
+        }
+        const el = await driver.wait(selenium_webdriver_1.until.elementLocated(selenium_webdriver_1.By.css(selector)), this.timeoutMs);
+        await driver.wait(selenium_webdriver_1.until.elementIsVisible(el), this.timeoutMs).catch(() => undefined);
+        await driver.actions({ async: true }).move({ origin: el }).perform();
+    }
+    /**
+     * Navigates the current page to the given URL and waits for the page load.
+     */
+    async navigate(url) {
+        const driver = this.driver;
+        if (driver === null) {
+            throw new Error("Browser not launched. Call launchBrowser() first.");
+        }
+        await driver.get(url);
+    }
+    /**
+     * Returns true when the element identified by the CSS selector is visible.
+     * Never throws — returns false when the element is absent or not displayed.
+     * Safe to use as a probe in resolveLocator().
+     */
+    async isVisible(selector) {
+        const driver = this.driver;
+        if (driver === null) {
+            return false;
+        }
+        try {
+            const els = await driver.findElements(selenium_webdriver_1.By.css(selector));
+            if (els.length === 0) {
+                return false;
+            }
+            const el = els[0];
+            if (!el) {
+                return false;
+            }
+            return await el.isDisplayed();
+        }
+        catch {
+            return false;
+        }
+    }
     async findFirstCss(driver, selectors) {
         for (const selector of selectors) {
             try {

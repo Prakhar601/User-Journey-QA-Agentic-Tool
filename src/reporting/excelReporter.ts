@@ -185,6 +185,25 @@ function estimateStepsExecuted(businessObjective: string | undefined): number {
     .filter((line) => line.length > 0).length;
 }
 
+/**
+ * Derives a human-readable assertion coverage string from a ScenarioResult.
+ * Returns undefined when no assertion summary data is available (e.g. legacy results).
+ */
+function deriveAssertionCoverageText(
+  result: ScenarioResult
+): string | undefined {
+  const summary = result.assertionSummary;
+  if (!summary) return undefined;
+
+  const fulfilledCount: number = summary.fulfilled.length;
+  const totalAssertions: number =
+    summary.fulfilled.length + summary.failed.length + summary.pending.length;
+
+  if (totalAssertions === 0) return undefined;
+
+  return `${fulfilledCount} of ${totalAssertions} assertions satisfied`;
+}
+
 function toScenarioReport(
   result: ScenarioResult,
   context: ReportingContext
@@ -210,6 +229,12 @@ function toScenarioReport(
 
   if (translatedNetworkComments.length > 0 && resultStatus === "Fail") {
     translatedReasons.push(...translatedNetworkComments);
+  }
+
+  // Append assertion coverage text when the scenario failed and has assertion data.
+  const assertionCoverage: string | undefined = deriveAssertionCoverageText(result);
+  if (resultStatus === "Fail" && assertionCoverage) {
+    translatedReasons.push(assertionCoverage);
   }
 
   const failureReason: string | undefined =
@@ -858,7 +883,8 @@ function addSummarySheet(
 function addExecutiveSummarySheet(
   workbook: XLSX.WorkBook,
   reports: ScenarioReport[],
-  context: ReportingContext
+  context: ReportingContext,
+  scenarioResults: ScenarioResult[] = []
 ): void {
   if (reports.length === 0) {
     return;
@@ -952,6 +978,25 @@ function addExecutiveSummarySheet(
           aiSummary =
             "This scenario did not complete successfully due to an unexpected issue during the test run.";
         }
+
+        // Enrich failed scenario summary with assertion coverage and stop reason
+        // when that data is available (adaptive mode runs only).
+        const scenarioResultForExec = scenarioResults[reports.indexOf(report)] as
+          | (typeof scenarioResults[0])
+          | undefined;
+        if (scenarioResultForExec) {
+          const assertionCoverage = deriveAssertionCoverageText(scenarioResultForExec);
+          if (assertionCoverage) {
+            aiSummary += ` (${assertionCoverage})`;
+          }
+          const rawStopReason = scenarioResultForExec.stopReason;
+          if (rawStopReason) {
+            const cleanStop = rawStopReason.replace(/^Stopped:\s*/i, "").trim();
+            if (cleanStop) {
+              aiSummary += ` Stop reason: ${cleanStop}.`;
+            }
+          }
+        }
       }
 
       const aiSummaryBusiness = toBusinessLanguage(aiSummary);
@@ -1044,9 +1089,14 @@ export async function writeTestResultsExcel(
     "Actual Outcome",
     "Result",
     "Failure Reason",
+    "Stop Reason",
+    "Assertions",
   ];
 
-  const dataRows: (string | undefined)[][] = reports.map((report) => {
+  const dataRows: (string | undefined)[][] = scenarioResults.map((result, i) => {
+    const report = reports[i];
+    if (!report) return [];
+
     const expectedOutcomeText =
       report.result === "Pass"
         ? "The workflow should complete successfully."
@@ -1062,12 +1112,22 @@ export async function writeTestResultsExcel(
         ? toBusinessLanguage(report.failureReason)
         : undefined;
 
+    // Stop reason — strip internal prefix for readability.
+    const stopReasonText: string | undefined = result.stopReason
+      ? result.stopReason.replace(/^Stopped:\s*/i, "").trim()
+      : undefined;
+
+    // Assertion coverage: "X of Y assertions satisfied" (fail only) or score.
+    const assertionText: string | undefined = deriveAssertionCoverageText(result);
+
     return [
       report.scenarioName,
       expectedOutcomeText,
       actualOutcomeText,
       report.result,
       failureReasonText,
+      stopReasonText,
+      assertionText,
     ];
   });
 
@@ -1085,6 +1145,8 @@ export async function writeTestResultsExcel(
       40, // Actual Outcome
       15, // Result
       40, // Failure Reason
+      28, // Stop Reason
+      28, // Assertions
     ],
     false
   );
@@ -1092,7 +1154,7 @@ export async function writeTestResultsExcel(
   XLSX.utils.book_append_sheet(workbook, worksheet, "Test Results");
 
   // Executive Summary sheet (second sheet) with high-level metrics
-  addExecutiveSummarySheet(workbook, reports, context);
+  addExecutiveSummarySheet(workbook, reports, context, scenarioResults);
 
   const internetSpeedMbps: number | undefined = await measureInternetSpeedMbps();
 
@@ -1123,11 +1185,16 @@ export async function writeRegressionReportExcel(
     "Actual Outcome",
     "Result",
     "Failure Reason",
+    "Stop Reason",
+    "Assertions",
     "Execution Date",
     "Execution Environment",
   ];
 
-  const dataRows: (string | undefined)[][] = reports.map((report) => {
+  const dataRows: (string | undefined)[][] = scenarioResults.map((result, i) => {
+    const report = reports[i];
+    if (!report) return [];
+
     const expectedOutcomeText =
       report.result === "Pass"
         ? "The workflow should complete successfully."
@@ -1143,6 +1210,14 @@ export async function writeRegressionReportExcel(
         ? toBusinessLanguage(report.failureReason)
         : undefined;
 
+    // Stop reason — strip internal prefix for readability.
+    const stopReasonText: string | undefined = result.stopReason
+      ? result.stopReason.replace(/^Stopped:\s*/i, "").trim()
+      : undefined;
+
+    // Assertion coverage text.
+    const assertionText: string | undefined = deriveAssertionCoverageText(result);
+
     const executionDateForRow: string =
       context.executionMetadata?.executionDate ?? report.executionDate;
 
@@ -1155,6 +1230,8 @@ export async function writeRegressionReportExcel(
       actualOutcomeText,
       report.result,
       failureReasonText,
+      stopReasonText,
+      assertionText,
       executionDateForRow,
       executionEnvironmentForRow,
     ];
@@ -1174,6 +1251,8 @@ export async function writeRegressionReportExcel(
       40, // Actual Outcome
       15, // Result
       40, // Failure Reason
+      28, // Stop Reason
+      28, // Assertions
       20, // Execution Date
       30, // Execution Environment
     ],
@@ -1183,7 +1262,7 @@ export async function writeRegressionReportExcel(
   XLSX.utils.book_append_sheet(workbook, worksheet, "Regression Report");
 
   // Executive Summary sheet (second sheet) with high-level metrics
-  addExecutiveSummarySheet(workbook, reports, context);
+  addExecutiveSummarySheet(workbook, reports, context, scenarioResults);
 
   const internetSpeedMbps: number | undefined = await measureInternetSpeedMbps();
 

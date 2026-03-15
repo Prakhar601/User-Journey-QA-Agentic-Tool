@@ -1,6 +1,8 @@
 import * as path from "path";
 import type {
   AgentState,
+  AssertionContract,
+  AssertionState,
   ExecutionIntelligenceContext,
   Plan,
   ScenarioResult,
@@ -14,6 +16,19 @@ import { runPythonAgent, PythonBrowserState } from "../ai/mcpClient";
 import { callModel } from "../ai/githubModelsClient";
 import { analyzeNetwork } from "../browser/networkAnalyzer";
 import { ensureEnterpriseOutputStructure } from "../reporting/outputManager";
+import { parseInteractiveElements } from "../browser/domParser";
+import type { RichElement } from "../browser/domParser";
+import {
+  dispatchAction,
+  type AdaptiveNextAction as DispatcherNextAction,
+} from "../browser/actionDispatcher";
+import {
+  parseGoalToContract,
+  evaluateAssertions,
+  finaliseTextAbsentAssertions,
+  initAssertionState,
+  computePartialScore,
+} from "../browser/assertionChecker";
 
 type AutomationToolId = "playwright" | "selenium";
 
@@ -27,6 +42,12 @@ type AutomationController = {
   captureScreenshot(filePath: string): Promise<void>;
   waitForTimeout?(ms: number): Promise<void>;
   close(): Promise<void>;
+  // New methods added by the adaptive loop refactor:
+  fill?(selector: string, value: string): Promise<void>;
+  selectOption?(selector: string, value: string): Promise<void>;
+  hover?(selector: string): Promise<void>;
+  navigate?(url: string): Promise<void>;
+  isVisible?(selector: string): Promise<boolean>;
 };
 
 let phase4Logged: boolean = false;
@@ -111,6 +132,20 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
 
         const scenarioStartTimeMs: number = Date.now();
 
+        // Compile assertion contract from scenario description before the loop.
+        const assertionContract: AssertionContract = await parseGoalToContract(
+          workflowDescription,
+          config.model,
+          config.githubToken,
+          config.llmEndpoint,
+          config.llmProvider
+        );
+
+        // Capture Playwright-session DOM baseline immediately after login.
+        // This avoids the cross-session baseline problem with pythonState.dom_snapshot.
+        const playwrightInitialDom: string = await browser.getDOMSnapshot().catch(() => "");
+        const playwrightInitialDomHash: string = hashDomSnapshotStatic(playwrightInitialDom);
+
         const adaptiveResult: AdaptiveExecutionResult =
           await adaptiveExecutionLoop({
             browser,
@@ -121,8 +156,10 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
             llmEndpoint: config.llmEndpoint,
             llmProvider: config.llmProvider,
             deadlineMs,
-            maxSteps: 20,
+            maxSteps: 25,
             screenshotsDir,
+            assertionContract,
+            initialDomHash: playwrightInitialDomHash,
           });
 
         latestPlan = {
@@ -136,7 +173,8 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
 
         const postDomSnapshot: string = await browser.getDOMSnapshot();
         const scenarioEndTimeMs: number = Date.now();
-        const uiChanged: boolean = postDomSnapshot !== initialDomSnapshot;
+        const postDomHash: string = hashDomSnapshotStatic(postDomSnapshot);
+        const uiChanged: boolean = postDomHash !== playwrightInitialDomHash;
 
         const allNetworkLogs = await browser.getNetworkLogs();
         const allEndpoints: string[] = allNetworkLogs.map((entry) => entry.url);
@@ -304,10 +342,18 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
 
         const actual: string = actualParts.join(" ");
 
+        // Assertion-driven pass/fail: use contract assertions when available,
+        // fall back to DOM-diff when the contract was empty.
+        const totalContractAssertions: number =
+          adaptiveResult.assertionState.fulfilled.length +
+          adaptiveResult.assertionState.failed.length +
+          adaptiveResult.assertionState.pending.length;
         const pass: boolean =
           !adaptiveResult.stepExecutionFailed &&
-          uiChanged &&
-          networkValidationNotes.length === 0;
+          networkValidationNotes.length === 0 &&
+          (totalContractAssertions > 0
+            ? adaptiveResult.assertionState.fulfilled.length === totalContractAssertions
+            : uiChanged);
 
         const scenarioResult: ScenarioResult = {
           scenarioName: workflowDescription,
@@ -321,6 +367,13 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
             adaptiveResult.screenshots && adaptiveResult.screenshots.length > 0
               ? adaptiveResult.screenshots.slice()
               : undefined,
+          assertionSummary: {
+            fulfilled: adaptiveResult.assertionState.fulfilled.slice(),
+            failed: adaptiveResult.assertionState.failed.slice(),
+            pending: adaptiveResult.assertionState.pending.slice(),
+          },
+          stopReason: adaptiveResult.stopReason,
+          partialScore: adaptiveResult.partialScore,
         };
 
         if (metricsForScenario) {
@@ -733,12 +786,31 @@ function buildExecutionIntelligenceContext(
   };
 }
 
-type AdaptiveActionType = "CLICK" | "SCROLL" | "WAIT" | "STOP";
+type AdaptiveActionType =
+  | "CLICK"
+  | "TYPE"
+  | "SELECT"
+  | "CLEAR"
+  | "HOVER"
+  | "FOCUS"
+  | "NAVIGATE"
+  | "SCROLL"
+  | "WAIT"
+  | "ASSERT"
+  | "STOP";
 
 type AdaptiveNextAction = {
   type: AdaptiveActionType;
+  /** Element index from RichElement.elementIndex — used for element-targeting actions. */
+  elementIndex?: number;
+  /** Legacy CSS selector (backward compat for CLICK from old plan path). */
   selector?: string;
+  /** Text value for TYPE and SELECT actions. */
+  value?: string;
+  /** Target URL for NAVIGATE. */
+  url?: string;
   milliseconds?: number;
+  assertionType?: string;
   reason?: string;
 };
 
@@ -753,6 +825,10 @@ type AdaptiveExecutionLoopContext = {
   deadlineMs: number;
   maxSteps: number;
   screenshotsDir: string;
+  /** Compiled assertion contract produced by parseGoalToContract() before the loop. */
+  assertionContract: AssertionContract;
+  /** DOM hash captured from the Playwright session immediately after login. */
+  initialDomHash: string;
 };
 
 type AdaptiveExecutionResult = {
@@ -762,6 +838,8 @@ type AdaptiveExecutionResult = {
   stepExecutionFailed: boolean;
   retryAttempted: boolean;
   screenshots: string[];
+  assertionState: AssertionState;
+  partialScore: number;
 };
 
 type AdaptiveNetworkSnapshot = {
@@ -786,14 +864,23 @@ type InteractiveElementSummary = {
 
 let phase3Logged: boolean = false;
 
+/**
+ * Fast, deterministic DOM hash used for stuck-state detection.
+ * Extracted to module scope so runWorkflow can use it for the
+ * Playwright-session baseline (replacing the cross-session Python baseline).
+ */
+function hashDomSnapshotStatic(snapshot: string): string {
+  let hash = 0;
+  for (let i = 0; i < snapshot.length; i += 1) {
+    hash = (hash * 31 + snapshot.charCodeAt(i)) >>> 0;
+  }
+  return `${snapshot.length}:${hash}`;
+}
+
 async function adaptiveExecutionLoop(
   context: AdaptiveExecutionLoopContext
 ): Promise<AdaptiveExecutionResult> {
   const { browser } = context;
-  const tool: AutomationToolId = context.tool;
-
-  const executeActionPlaywright = createPlaywrightExecutor(browser);
-  const executeActionSelenium = createSeleniumExecutor(browser);
 
   let stepCount = 0;
   const maxSteps: number = Math.max(1, Math.floor(context.maxSteps));
@@ -804,19 +891,21 @@ async function adaptiveExecutionLoop(
   let stepExecutionFailed = false;
   let retryAttempted = false;
 
-  let previousDomHash: string | null = null;
+  let previousDomHash: string | null = context.initialDomHash || null;
   let retryCount = 0;
+  let stopRejectionCount = 0;
+  const MAX_STOP_REJECTIONS = 3;
 
   const screenshots: string[] = [];
 
-  const hashDomSnapshot = (snapshot: string): string => {
-    // Fast, deterministic hash for stuck detection (not cryptographic).
-    let hash = 0;
-    for (let i = 0; i < snapshot.length; i += 1) {
-      hash = (hash * 31 + snapshot.charCodeAt(i)) >>> 0;
-    }
-    return `${snapshot.length}:${hash}`;
-  };
+  // Initialise assertion tracking from the compiled contract.
+  let assertionState: AssertionState = initAssertionState(context.assertionContract);
+
+  if (!phase3Logged) {
+    // eslint-disable-next-line no-console
+    console.log("Phase 3 complete – interactive DOM extraction integrated");
+    phase3Logged = true;
+  }
 
   while (stepCount < maxSteps) {
     if (Date.now() > context.deadlineMs) {
@@ -855,8 +944,8 @@ async function adaptiveExecutionLoop(
       break;
     }
 
-    // Phase 2: Capture DOM BEFORE LLM, hash it, and detect stuck state.
-    currentDomHash = hashDomSnapshot(domSnapshot);
+    // Hash DOM for stuck detection (unchanged from previous implementation).
+    currentDomHash = hashDomSnapshotStatic(domSnapshot);
     if (previousDomHash !== null && currentDomHash === previousDomHash) {
       if (retryCount < 1) {
         retryCount += 1;
@@ -883,16 +972,29 @@ async function adaptiveExecutionLoop(
       previousDomHash = currentDomHash;
     }
 
-    const interactiveElements: InteractiveElementSummary[] =
-      extractInteractiveElements(domSnapshot);
+    // Evaluate assertions against current state after every DOM capture.
+    const scenarioNetworkLogsForAssertion = await browser.getNetworkLogs().catch(() => []);
+    const currentUrl: string = await browser.getDOMSnapshot()
+      .then(() => "")
+      .catch(() => "");
+    assertionState = evaluateAssertions(
+      context.assertionContract,
+      assertionState,
+      domSnapshot,
+      scenarioNetworkLogsForAssertion,
+      currentUrl
+    );
 
-    if (!phase3Logged) {
-      // eslint-disable-next-line no-console
-      console.log(
-        "Phase 3 complete – interactive DOM extraction integrated"
-      );
-      phase3Logged = true;
+    // Early exit: all assertions fulfilled — goal reached.
+    const hasContract: boolean =
+      assertionState.fulfilled.length + assertionState.failed.length + assertionState.pending.length > 0;
+    if (hasContract && assertionState.pending.length === 0 && assertionState.failed.length === 0) {
+      stopReason = "Stopped: ALL_FULFILLED.";
+      break;
     }
+
+    // Parse interactive elements using the new htmlparser2-based extractor.
+    const richElements: RichElement[] = parseInteractiveElements(domSnapshot);
 
     let nextAction: AdaptiveNextAction | null = null;
     try {
@@ -906,7 +1008,9 @@ async function adaptiveExecutionLoop(
         goal: context.workflowDescription,
         stepCount,
         executedSteps,
-        interactiveElements,
+        richElements,
+        assertionState,
+        assertionContract: context.assertionContract,
       });
     } catch (error) {
       const message: string =
@@ -917,17 +1021,25 @@ async function adaptiveExecutionLoop(
       break;
     }
 
+    // STOP-gating: reject STOP when there are still pending assertions.
     if (!nextAction || nextAction.type === "STOP") {
-      stopReason =
-        nextAction?.reason?.trim().length
-          ? `Stopped: ${nextAction.reason.trim()}`
-          : "Stopped: model returned STOP/no action.";
-      break;
-    }
-
-    const stepString: string | null = toInteractionStep(nextAction);
-    if (!stepString) {
-      stopReason = "Stopped: model returned an invalid next action.";
+      const pendingCount: number = assertionState.pending.length;
+      if (pendingCount > 0 && stopRejectionCount < MAX_STOP_REJECTIONS) {
+        // Reject STOP — pending assertions remain. Continue the loop.
+        stopRejectionCount += 1;
+        uiNotes += `STOP rejected (${stopRejectionCount}/${MAX_STOP_REJECTIONS}): ${pendingCount} assertion(s) still pending. `;
+        stepCount += 1; // Count the wasted step to prevent infinite loops.
+        continue;
+      }
+      // Accept STOP: no pending assertions, or rejection limit reached.
+      if (pendingCount > 0) {
+        stopReason = "Stopped: ASSERTIONS_UNREACHABLE.";
+      } else {
+        stopReason =
+          nextAction?.reason?.trim().length
+            ? `Stopped: ${nextAction.reason.trim()}`
+            : "Stopped: EXPLICIT_STOP.";
+      }
       break;
     }
 
@@ -951,22 +1063,29 @@ async function adaptiveExecutionLoop(
       break;
     }
 
+    // Dispatch the action using the new dispatcher (supports all 10 action types).
+    const dispatcherAction: DispatcherNextAction = {
+      type: nextAction.type as DispatcherNextAction["type"],
+      elementIndex: nextAction.elementIndex,
+      selector: nextAction.selector,
+      value: nextAction.value,
+      url: nextAction.url,
+      milliseconds: nextAction.milliseconds,
+      assertionType: nextAction.assertionType,
+      reason: nextAction.reason,
+    };
+
     try {
-      const success: boolean =
-        tool === "selenium"
-          ? await executeActionSelenium(stepString)
-          : await executeActionPlaywright(stepString);
-      if (!success) {
+      const dispatchResult = await dispatchAction(browser, dispatcherAction, richElements);
+      if (!dispatchResult.success) {
         if (!retryAttempted) {
           retryAttempted = true;
-          const retrySuccess: boolean =
-            tool === "selenium"
-              ? await executeActionSelenium(stepString)
-              : await executeActionPlaywright(stepString);
-          if (!retrySuccess) {
-            uiNotes += `Step failed after retry: "${stepString}". `;
+          // Retry once — dispatchAction already tried selector fallbacks internally.
+          const retryResult = await dispatchAction(browser, dispatcherAction, richElements);
+          if (!retryResult.success) {
+            uiNotes += `Step failed after retry: "${retryResult.errorMessage ?? "unknown error"}". `;
             stepExecutionFailed = true;
-            stopReason = "Stopped: action execution failed.";
+            stopReason = "Stopped: ACTION_FAILED.";
             try {
               const screenshotPath: string | null =
                 await captureFailureScreenshot(
@@ -984,9 +1103,9 @@ async function adaptiveExecutionLoop(
             break;
           }
         } else {
-          uiNotes += `Step failed: "${stepString}". `;
+          uiNotes += `Step failed: "${dispatchResult.errorMessage ?? "unknown error"}". `;
           stepExecutionFailed = true;
-          stopReason = "Stopped: action execution failed.";
+          stopReason = "Stopped: ACTION_FAILED.";
           try {
             const screenshotPath: string | null =
               await captureFailureScreenshot(
@@ -1007,9 +1126,9 @@ async function adaptiveExecutionLoop(
     } catch (error) {
       const message: string =
         error instanceof Error ? error.message : String(error);
-      uiNotes += `Execution error for "${stepString}": ${message}. `;
+      uiNotes += `Execution error: ${message}. `;
       stepExecutionFailed = true;
-      stopReason = "Stopped: action execution error.";
+      stopReason = "Stopped: ACTION_FAILED.";
       try {
         const screenshotPath: string | null = await captureFailureScreenshot(
           browser,
@@ -1026,21 +1145,33 @@ async function adaptiveExecutionLoop(
       break;
     }
 
-    executedSteps.push(stepString);
+    // Build a step description string for the executed steps log.
+    const stepDescription: string = nextAction.elementIndex !== undefined
+      ? `${nextAction.type}:element[${nextAction.elementIndex}]`
+      : nextAction.selector
+        ? `${nextAction.type}:${nextAction.selector}`
+        : nextAction.url
+          ? `${nextAction.type}:${nextAction.url}`
+          : nextAction.type;
+    executedSteps.push(stepDescription);
     stepCount += 1;
 
     try {
       const postDomSnapshot: string = await captureDOM(browser);
-      // Phase 2: Capture DOM AFTER action execution and update hash.
-      currentDomHash = hashDomSnapshot(postDomSnapshot);
+      // Update hash after action execution for next-iteration stuck detection.
+      currentDomHash = hashDomSnapshotStatic(postDomSnapshot);
     } catch {
       // Ignore post-action snapshot errors; loop safety relies on deadline/maxSteps.
     }
   }
 
   if (stepCount >= maxSteps) {
-    stopReason = `Stopped: max steps reached (${maxSteps}).`;
+    stopReason = `Stopped: MAX_STEPS (${maxSteps}).`;
   }
+
+  // Finalise textAbsent assertions: absence at loop exit counts as fulfilled.
+  assertionState = finaliseTextAbsentAssertions(context.assertionContract, assertionState);
+  const partialScore: number = computePartialScore(assertionState, context.assertionContract);
 
   return {
     executedSteps,
@@ -1049,6 +1180,8 @@ async function adaptiveExecutionLoop(
     stepExecutionFailed,
     retryAttempted,
     screenshots,
+    assertionState,
+    partialScore,
   };
 }
 
@@ -1112,39 +1245,52 @@ async function decideNextAction(input: {
   goal: string;
   stepCount: number;
   executedSteps: string[];
-  interactiveElements: InteractiveElementSummary[];
+  richElements: RichElement[];
+  assertionState: AssertionState;
+  assertionContract: AssertionContract;
 }): Promise<AdaptiveNextAction | null> {
-  const domPreview: string = input.domSnapshot.slice(0, 4000);
+  const domPreview: string = input.domSnapshot.slice(0, 8000);
   const executedPreview: string = input.executedSteps.slice(-10).join("\n");
-  const interactivePreview: InteractiveElementSummary[] =
-    input.interactiveElements.slice(0, 50);
+  // Present up to 60 elements to the LLM, using elementIndex as the targeting handle.
+  const elementPreview = input.richElements.slice(0, 60).map((el) => ({
+    index: el.elementIndex,
+    tag: el.tag,
+    role: el.role,
+    ariaLabel: el.ariaLabel,
+    text: el.textContent,
+    placeholder: el.placeholder,
+    id: el.id,
+    disabled: el.disabled,
+    topSelector: el.selectorRank[0]?.strategy ?? "css",
+  }));
+
+  const pendingAssertions: string[] = input.assertionState.pending;
+  const stopAllowed: boolean = pendingAssertions.length === 0;
 
   const prompt = `
 You are an adaptive browser automation agent.
 
 Decide the NEXT SINGLE ACTION to achieve the goal. Do NOT output a full plan.
 Use only what is visible in the DOM snapshot and recent network observations.
-You MUST choose CLICK targets ONLY from the provided interactiveElements list.
-For CLICK actions, the selector MUST be a CSS id selector of the form "#ELEMENT_ID"
-where ELEMENT_ID is the "id" of one of the interactiveElements entries that has a non-empty id.
-If no appropriate element id exists, you MUST return type "STOP".
+For element-targeting actions (CLICK, TYPE, SELECT, CLEAR, HOVER, FOCUS), use the
+"elementIndex" field to reference an element from the interactiveElements list.
 
-Return ONLY valid JSON.
-Do NOT include explanations.
-Do NOT include markdown.
-Do NOT include backticks.
-Do NOT include text before or after JSON.
+Return ONLY valid JSON. No explanation. No markdown. No backticks.
 
 Schema:
 {
-  "type": "CLICK | SCROLL | WAIT | STOP",
-  "selector": "string (required for CLICK)",
-  "milliseconds": "number (optional for WAIT, default 1000)",
+  "type": "CLICK | TYPE | SELECT | CLEAR | HOVER | FOCUS | NAVIGATE | SCROLL | WAIT | ASSERT | STOP",
+  "elementIndex": number (required for CLICK/TYPE/SELECT/CLEAR/HOVER/FOCUS/ASSERT),
+  "value": "string (required for TYPE and SELECT)",
+  "url": "string (required for NAVIGATE)",
+  "milliseconds": number (optional for WAIT, default 1000),
   "reason": "string (optional)"
 }
 
-If the goal is already achieved, return type STOP.
-If you cannot find a safe actionable next step, return type STOP.
+${stopAllowed
+  ? "If the goal is fully achieved, you may return type STOP."
+  : `⚠ STOP is NOT allowed yet. The following assertions are still pending:\n${pendingAssertions.map((a) => "  - " + a).join("\n")}\nYou MUST continue until all assertions are satisfied.`
+}
 
 Goal:
 ${input.goal}
@@ -1154,8 +1300,8 @@ Step count so far: ${input.stepCount}
 Previously executed steps (most recent last):
 ${executedPreview}
 
-Interactive elements (subset):
-${JSON.stringify(interactivePreview, null, 2)}
+Interactive elements (up to 60, referenced by index):
+${JSON.stringify(elementPreview, null, 2)}
 
 Recent network endpoints:
 ${JSON.stringify(input.network.recentEndpoints, null, 2)}
@@ -1169,8 +1315,6 @@ ${domPreview}
 Return ONLY the JSON object.
 `;
 
-  // Retry a few times if the model proposes invalid actions
-  // (e.g., CLICK selectors not matching extracted interactive elements).
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const rawResponse: string = await callModel(
       input.model,
@@ -1185,7 +1329,7 @@ Return ONLY the JSON object.
     const parsed: AdaptiveNextAction | null =
       safeParseAdaptiveNextAction(rawResponse);
     const validated: AdaptiveNextAction | null =
-      validateAdaptiveNextAction(parsed, input.interactiveElements);
+      validateAdaptiveNextAction(parsed, input.richElements);
     if (validated) {
       return validated;
     }
@@ -1256,21 +1400,25 @@ function safeParseAdaptiveNextAction(
 
   const obj = parsed as {
     type?: unknown;
+    elementIndex?: unknown;
     selector?: unknown;
+    value?: unknown;
+    url?: unknown;
     milliseconds?: unknown;
+    assertionType?: unknown;
     reason?: unknown;
   };
 
   const rawType: string =
     typeof obj.type === "string" ? obj.type.trim().toUpperCase() : "";
 
-  const type: AdaptiveActionType | null =
-    rawType === "CLICK" ||
-    rawType === "SCROLL" ||
-    rawType === "WAIT" ||
-    rawType === "STOP"
-      ? (rawType as AdaptiveActionType)
-      : null;
+  const validTypes: string[] = [
+    "CLICK", "TYPE", "SELECT", "CLEAR", "HOVER", "FOCUS",
+    "NAVIGATE", "SCROLL", "WAIT", "ASSERT", "STOP",
+  ];
+  const type: AdaptiveActionType | null = validTypes.includes(rawType)
+    ? (rawType as AdaptiveActionType)
+    : null;
 
   if (type === null) {
     return null;
@@ -1278,9 +1426,13 @@ function safeParseAdaptiveNextAction(
 
   return {
     type,
+    elementIndex: typeof obj.elementIndex === "number" ? Math.floor(obj.elementIndex) : undefined,
     selector: typeof obj.selector === "string" ? obj.selector : undefined,
+    value: typeof obj.value === "string" ? obj.value : undefined,
+    url: typeof obj.url === "string" ? obj.url : undefined,
     milliseconds:
       typeof obj.milliseconds === "number" ? obj.milliseconds : undefined,
+    assertionType: typeof obj.assertionType === "string" ? obj.assertionType : undefined,
     reason: typeof obj.reason === "string" ? obj.reason : undefined,
   };
 }
@@ -1295,25 +1447,33 @@ function tryParseJson(text: string): unknown | null {
 
 function validateAdaptiveNextAction(
   action: AdaptiveNextAction | null,
-  interactiveElements: InteractiveElementSummary[]
+  richElements: RichElement[]
 ): AdaptiveNextAction | null {
   if (!action) {
     return null;
   }
 
-  if (action.type === "CLICK") {
-    const selector: string =
-      typeof action.selector === "string" ? action.selector.trim() : "";
-    if (!selector || !selector.startsWith("#")) {
+  // Element-targeting actions must provide a valid elementIndex.
+  const elementTargetingTypes: AdaptiveActionType[] = [
+    "CLICK", "TYPE", "SELECT", "CLEAR", "HOVER", "FOCUS", "ASSERT",
+  ];
+  if (elementTargetingTypes.includes(action.type)) {
+    if (action.elementIndex !== undefined) {
+      const match = richElements.find((el) => el.elementIndex === action.elementIndex);
+      if (!match) {
+        return null;
+      }
+    } else if (action.type === "CLICK" && action.selector) {
+      // Legacy path: raw CSS selector accepted for backward compatibility.
+      // No further validation — the dispatcher will attempt it directly.
+    } else {
       return null;
     }
-    const id: string = selector.slice(1);
-    if (!id) {
-      return null;
-    }
-    const match: InteractiveElementSummary | undefined =
-      interactiveElements.find((el) => el.id === id);
-    if (!match) {
+  }
+
+  // NAVIGATE requires a non-empty url.
+  if (action.type === "NAVIGATE") {
+    if (!action.url || action.url.trim().length === 0) {
       return null;
     }
   }

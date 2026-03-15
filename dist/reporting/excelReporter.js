@@ -169,6 +169,20 @@ function estimateStepsExecuted(businessObjective) {
         .map((line) => line.trim())
         .filter((line) => line.length > 0).length;
 }
+/**
+ * Derives a human-readable assertion coverage string from a ScenarioResult.
+ * Returns undefined when no assertion summary data is available (e.g. legacy results).
+ */
+function deriveAssertionCoverageText(result) {
+    const summary = result.assertionSummary;
+    if (!summary)
+        return undefined;
+    const fulfilledCount = summary.fulfilled.length;
+    const totalAssertions = summary.fulfilled.length + summary.failed.length + summary.pending.length;
+    if (totalAssertions === 0)
+        return undefined;
+    return `${fulfilledCount} of ${totalAssertions} assertions satisfied`;
+}
 function toScenarioReport(result, context) {
     const resultStatus = toStatus(result.pass);
     const translatedReasons = [];
@@ -188,6 +202,11 @@ function toScenarioReport(result, context) {
     }
     if (translatedNetworkComments.length > 0 && resultStatus === "Fail") {
         translatedReasons.push(...translatedNetworkComments);
+    }
+    // Append assertion coverage text when the scenario failed and has assertion data.
+    const assertionCoverage = deriveAssertionCoverageText(result);
+    if (resultStatus === "Fail" && assertionCoverage) {
+        translatedReasons.push(assertionCoverage);
     }
     const failureReason = resultStatus === "Fail" && translatedReasons.length > 0
         ? Array.from(new Set(translatedReasons)).join(" ")
@@ -662,7 +681,7 @@ function addSummarySheet(workbook, reports, context) {
     }
     XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
 }
-function addExecutiveSummarySheet(workbook, reports, context) {
+function addExecutiveSummarySheet(workbook, reports, context, scenarioResults = []) {
     if (reports.length === 0) {
         return;
     }
@@ -724,6 +743,22 @@ function addExecutiveSummarySheet(workbook, reports, context) {
             else {
                 aiSummary =
                     "This scenario did not complete successfully due to an unexpected issue during the test run.";
+            }
+            // Enrich failed scenario summary with assertion coverage and stop reason
+            // when that data is available (adaptive mode runs only).
+            const scenarioResultForExec = scenarioResults[reports.indexOf(report)];
+            if (scenarioResultForExec) {
+                const assertionCoverage = deriveAssertionCoverageText(scenarioResultForExec);
+                if (assertionCoverage) {
+                    aiSummary += ` (${assertionCoverage})`;
+                }
+                const rawStopReason = scenarioResultForExec.stopReason;
+                if (rawStopReason) {
+                    const cleanStop = rawStopReason.replace(/^Stopped:\s*/i, "").trim();
+                    if (cleanStop) {
+                        aiSummary += ` Stop reason: ${cleanStop}.`;
+                    }
+                }
             }
         }
         const aiSummaryBusiness = toBusinessLanguage(aiSummary);
@@ -790,8 +825,13 @@ async function writeTestResultsExcel(scenarioResults, context) {
         "Actual Outcome",
         "Result",
         "Failure Reason",
+        "Stop Reason",
+        "Assertions",
     ];
-    const dataRows = reports.map((report) => {
+    const dataRows = scenarioResults.map((result, i) => {
+        const report = reports[i];
+        if (!report)
+            return [];
         const expectedOutcomeText = report.result === "Pass"
             ? "The workflow should complete successfully."
             : toBusinessLanguage(report.expectedOutcome ?? "");
@@ -801,12 +841,20 @@ async function writeTestResultsExcel(scenarioResults, context) {
         const failureReasonText = report.failureReason && report.failureReason.trim().length > 0
             ? toBusinessLanguage(report.failureReason)
             : undefined;
+        // Stop reason — strip internal prefix for readability.
+        const stopReasonText = result.stopReason
+            ? result.stopReason.replace(/^Stopped:\s*/i, "").trim()
+            : undefined;
+        // Assertion coverage: "X of Y assertions satisfied" (fail only) or score.
+        const assertionText = deriveAssertionCoverageText(result);
         return [
             report.scenarioName,
             expectedOutcomeText,
             actualOutcomeText,
             report.result,
             failureReasonText,
+            stopReasonText,
+            assertionText,
         ];
     });
     const rows = [headerRow, ...dataRows];
@@ -818,10 +866,12 @@ async function writeTestResultsExcel(scenarioResults, context) {
         40, // Actual Outcome
         15, // Result
         40, // Failure Reason
+        28, // Stop Reason
+        28, // Assertions
     ], false);
     XLSX.utils.book_append_sheet(workbook, worksheet, "Test Results");
     // Executive Summary sheet (second sheet) with high-level metrics
-    addExecutiveSummarySheet(workbook, reports, context);
+    addExecutiveSummarySheet(workbook, reports, context, scenarioResults);
     const internetSpeedMbps = await measureInternetSpeedMbps();
     await addSystemAnalysisSheet(workbook, scenarioResults, {
         internetSpeedMbps,
@@ -840,10 +890,15 @@ async function writeRegressionReportExcel(scenarioResults, context) {
         "Actual Outcome",
         "Result",
         "Failure Reason",
+        "Stop Reason",
+        "Assertions",
         "Execution Date",
         "Execution Environment",
     ];
-    const dataRows = reports.map((report) => {
+    const dataRows = scenarioResults.map((result, i) => {
+        const report = reports[i];
+        if (!report)
+            return [];
         const expectedOutcomeText = report.result === "Pass"
             ? "The workflow should complete successfully."
             : toBusinessLanguage(report.expectedOutcome ?? "");
@@ -853,6 +908,12 @@ async function writeRegressionReportExcel(scenarioResults, context) {
         const failureReasonText = report.failureReason && report.failureReason.trim().length > 0
             ? toBusinessLanguage(report.failureReason)
             : undefined;
+        // Stop reason — strip internal prefix for readability.
+        const stopReasonText = result.stopReason
+            ? result.stopReason.replace(/^Stopped:\s*/i, "").trim()
+            : undefined;
+        // Assertion coverage text.
+        const assertionText = deriveAssertionCoverageText(result);
         const executionDateForRow = context.executionMetadata?.executionDate ?? report.executionDate;
         const executionEnvironmentForRow = context.executionMetadata?.environment ?? report.executionEnvironment;
         return [
@@ -861,6 +922,8 @@ async function writeRegressionReportExcel(scenarioResults, context) {
             actualOutcomeText,
             report.result,
             failureReasonText,
+            stopReasonText,
+            assertionText,
             executionDateForRow,
             executionEnvironmentForRow,
         ];
@@ -874,12 +937,14 @@ async function writeRegressionReportExcel(scenarioResults, context) {
         40, // Actual Outcome
         15, // Result
         40, // Failure Reason
+        28, // Stop Reason
+        28, // Assertions
         20, // Execution Date
         30, // Execution Environment
     ], true);
     XLSX.utils.book_append_sheet(workbook, worksheet, "Regression Report");
     // Executive Summary sheet (second sheet) with high-level metrics
-    addExecutiveSummarySheet(workbook, reports, context);
+    addExecutiveSummarySheet(workbook, reports, context, scenarioResults);
     const internetSpeedMbps = await measureInternetSpeedMbps();
     await addSystemAnalysisSheet(workbook, scenarioResults, {
         internetSpeedMbps,

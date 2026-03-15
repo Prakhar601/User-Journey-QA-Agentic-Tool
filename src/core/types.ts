@@ -76,6 +76,38 @@ export interface ExecutionIntelligenceContext {
   };
 }
 
+/**
+ * Compiled set of assertions derived from a natural-language scenario description.
+ * Produced once by the goal parser before the adaptive execution loop begins.
+ */
+export interface AssertionContract {
+  /** Substring or regex source the final page URL must match. */
+  urlPattern?: string;
+  /** Strings that must appear somewhere in the DOM at loop exit. */
+  textPresent: string[];
+  /** Strings that must NOT appear in the DOM at loop exit. */
+  textAbsent: string[];
+  /** ARIA labels or descriptive identifiers of elements that must be visible. */
+  elementVisible: string[];
+  /** URL substrings that must have been observed in network logs during the scenario. */
+  apiCalled: string[];
+  /** Whether a form submission (POST / PUT / PATCH) must have been observed. */
+  formSubmitted: boolean;
+}
+
+/**
+ * Runtime tracking state for an AssertionContract being evaluated step-by-step.
+ * Each string value is the assertion key (e.g. the textPresent string, URL pattern, etc.).
+ */
+export interface AssertionState {
+  /** Assertion keys that have been satisfied and are permanently locked in. */
+  fulfilled: string[];
+  /** Assertion keys that are actively contradicted by the current browser state. */
+  failed: string[];
+  /** Assertion keys not yet evaluated or not yet matching. */
+  pending: string[];
+}
+
 export interface ScenarioResult {
   scenarioName: string;
   expected: string;
@@ -89,6 +121,26 @@ export interface ScenarioResult {
    * typically populated when failures or timeouts occur.
    */
   screenshots?: string[];
+  /**
+   * Structured summary of which assertions were fulfilled, failed, or still
+   * pending at the time the adaptive execution loop exited.
+   */
+  assertionSummary?: {
+    fulfilled: string[];
+    failed: string[];
+    pending: string[];
+  };
+  /**
+   * Classified reason the execution loop stopped.
+   * Examples: ALL_FULFILLED, TIMEOUT, MAX_STEPS, STUCK, ACTION_FAILED,
+   * LLM_ERROR, ASSERTIONS_UNREACHABLE, EXPLICIT_STOP.
+   */
+  stopReason?: string;
+  /**
+   * Fraction of assertions fulfilled at loop exit (0.0–1.0).
+   * 1.0 when the contract was empty (no assertions to check).
+   */
+  partialScore?: number;
 }
 
 export interface AgentState {
