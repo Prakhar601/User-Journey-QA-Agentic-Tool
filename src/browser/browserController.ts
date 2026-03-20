@@ -99,9 +99,12 @@ export class BrowserController {
     const page: Page = getPage();
     const locator: Locator = await this.buildSmartLocator(selector, page);
 
+    console.log("SELECTOR:", selector);
     await locator.waitFor({ state: "visible", timeout: this.timeoutMs });
     await locator.scrollIntoViewIfNeeded();
-    await locator.click();
+    await locator.click({ timeout: 5000 });
+    await page.waitForTimeout(1000);
+    console.log("SUCCESS:", true);
   }
 
   public async scroll(): Promise<void> {
@@ -263,99 +266,7 @@ export class BrowserController {
     selector: string,
     page: Page
   ): Promise<Locator> {
-    const trimmedSelector: string = selector.trim();
-    if (!trimmedSelector) {
-      return page.locator(selector);
-    }
-
-    const baseLocator: Locator = page.locator(trimmedSelector).first();
-
-    try {
-      const info = await baseLocator.evaluate((el) => {
-        const element = el as HTMLElement;
-        const getAttr = (name: string): string | null =>
-          element.getAttribute(name);
-
-        const tagName: string = element.tagName.toLowerCase();
-        const id: string | null = element.id || null;
-        const dataTestId: string | null = getAttr("data-testid");
-        const dataTest: string | null = getAttr("data-test");
-        const dataQa: string | null = getAttr("data-qa");
-        const ariaLabel: string | null = getAttr("aria-label");
-        const role: string | null = getAttr("role");
-        const placeholder: string | null =
-          (element as HTMLInputElement | HTMLTextAreaElement).placeholder ??
-          null;
-        const text: string = (
-          (element.innerText || element.textContent || "") as string
-        ).trim();
-
-        return {
-          tagName,
-          id,
-          dataTestId,
-          dataTest,
-          dataQa,
-          ariaLabel,
-          role,
-          placeholder,
-          text,
-        };
-      });
-
-      // Selector ranking priority:
-      // 1) data-testid
-      // 2) data-test
-      // 3) data-qa
-      // 4) aria-label
-      // 5) role with visible text
-      // 6) placeholder
-      // 7) element text
-      // 8) id
-      // 9) fallback CSS selector
-
-      if (info.dataTestId) {
-        return page.getByTestId(info.dataTestId);
-      }
-
-      if (info.dataTest) {
-        return page.locator(
-          `[data-test="${BrowserController.escapeForAttribute(info.dataTest)}"]`
-        );
-      }
-
-      if (info.dataQa) {
-        return page.locator(
-          `[data-qa="${BrowserController.escapeForAttribute(info.dataQa)}"]`
-        );
-      }
-
-      if (info.ariaLabel) {
-        return page.getByLabel(info.ariaLabel);
-      }
-
-      if (info.role && info.text) {
-        return page.getByRole(info.role as any, { name: info.text });
-      }
-
-      if (info.placeholder) {
-        return page.getByPlaceholder(info.placeholder);
-      }
-
-      if (info.text) {
-        return page.getByText(info.text);
-      }
-
-      if (info.id) {
-        return page.locator(
-          `#${BrowserController.escapeForAttribute(info.id)}`
-        );
-      }
-
-      return baseLocator;
-    } catch {
-      return baseLocator;
-    }
+    return page.locator(selector);
   }
 
   private static escapeForAttribute(value: string): string {

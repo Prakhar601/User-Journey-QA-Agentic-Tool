@@ -264,816 +264,549 @@ function toScenarioReport(
 function statusFillColor(status: TestResultStatus): string {
   switch (status) {
     case "Pass":
-      return "FF00B050"; // Green
+      return "FF00B050";
     case "Fail":
-      return "FFFF0000"; // Red
+      return "FFFF0000";
     case "Blocked":
-      return "FFFFFF00"; // Yellow
+      return "FFFFFF00";
     default:
-      return "FFFFFFFF"; // White
-  }
-}
-
-function applyEnterpriseLayoutToWorksheet(
-  worksheet: XLSX.WorkSheet,
-  columnWidths: number[],
-  hasResultColumn: boolean
-): void {
-  if (!worksheet["!ref"]) {
-    return;
-  }
-
-  const range = XLSX.utils.decode_range(worksheet["!ref"] as string);
-
-  // Set column widths
-  worksheet["!cols"] = columnWidths.map((wch) => ({ wch }));
-
-  // Detect the logical header row. For detailed scenario tables this is the row
-  // whose first column is "Scenario Name". For metric summaries it is the row
-  // whose first column is "Metric". This allows optional metadata blocks to be
-  // placed above the main table without breaking styling.
-  let headerRowIndex = range.s.r;
-  for (let row = range.s.r; row <= range.e.r; row++) {
-    const cellRef = XLSX.utils.encode_cell({ r: row, c: range.s.c });
-    const cell = worksheet[cellRef] as XLSX.CellObject | undefined;
-    if (!cell || typeof cell.v !== "string") continue;
-    const value = String(cell.v);
-    if (value === "Scenario Name" || value === "Metric") {
-      headerRowIndex = row;
-      break;
-    }
-  }
-
-  // Freeze header row
-  (worksheet as any)["!freeze"] = { xSplit: 0, ySplit: headerRowIndex + 1 };
-
-  const thinBorder = {
-    top: { style: "thin", color: { rgb: "FFCCCCCC" } },
-    bottom: { style: "thin", color: { rgb: "FFCCCCCC" } },
-    left: { style: "thin", color: { rgb: "FFCCCCCC" } },
-    right: { style: "thin", color: { rgb: "FFCCCCCC" } },
-  };
-
-  // Header styling
-  for (let col = range.s.c; col <= range.e.c; col++) {
-    const cellRef = XLSX.utils.encode_cell({ r: headerRowIndex, c: col });
-    const cell = worksheet[cellRef] as XLSX.CellObject | undefined;
-    if (!cell) continue;
-
-    cell.s = {
-      font: { bold: true, color: { rgb: "FFFFFFFF" } },
-      fill: {
-        patternType: "solid",
-        fgColor: { rgb: "FF203864" }, // Dark blue
-        bgColor: { rgb: "FF203864" },
-      },
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      border: thinBorder,
-    };
-  }
-
-  // Data cells styling
-  for (let row = headerRowIndex + 1; row <= range.e.r; row++) {
-    for (let col = range.s.c; col <= range.e.c; col++) {
-      const cellRef = XLSX.utils.encode_cell({ r: row, c: col });
-      const cell = worksheet[cellRef] as XLSX.CellObject | undefined;
-      if (!cell) continue;
-
-      const existing = cell.s ?? {};
-      cell.s = {
-        ...existing,
-        alignment: {
-          horizontal: "left",
-          vertical: "top",
-          wrapText: true,
-          ...(existing.alignment ?? {}),
-        },
-        border: existing.border ?? thinBorder,
-      };
-    }
-  }
-
-  // Result column color grading (if present)
-  if (hasResultColumn) {
-    const resultColIndex = range.s.c + (columnWidths.length > 0 ? 5 : 0); // index 5 for our schemas
-    for (let row = headerRowIndex + 1; row <= range.e.r; row++) {
-      const cellRef = XLSX.utils.encode_cell({ r: row, c: resultColIndex });
-      const cell = worksheet[cellRef] as XLSX.CellObject | undefined;
-      if (!cell || typeof cell.v !== "string") continue;
-
-      const status = cell.v as TestResultStatus;
-      let fillColor = statusFillColor(status);
-      let fontColor = "FFFFFFFF";
-
-      if (status === "Blocked") {
-        fontColor = "FF000000";
-      }
-
-      const existing = cell.s ?? {};
-      cell.s = {
-        ...existing,
-        font: {
-          ...(existing.font ?? {}),
-          bold: true,
-          color: { rgb: fontColor },
-        },
-        fill: {
-          patternType: "solid",
-          fgColor: { rgb: fillColor },
-          bgColor: { rgb: fillColor },
-        },
-        border: existing.border ?? thinBorder,
-      };
-    }
+      return "FFFFFFFF";
   }
 }
 
 function getSystemSpecs(): string {
   try {
-    const cpu: string = os.cpus()?.[0]?.model ?? "Unknown CPU";
-    const ramGB: number = Math.round(
-      os.totalmem() / (1024 * 1024 * 1024)
-    );
-    const osName: string = `${os.type()} ${os.release()}`;
-
-    return `${osName} | ${cpu} | ${ramGB}GB RAM`;
+    const cpus = os.cpus();
+    const cpu: string = cpus?.[0]?.model ?? "Unknown CPU";
+    const cores: number = cpus?.length ?? 0;
+    const ramGB: number = Math.round(os.totalmem() / (1024 * 1024 * 1024));
+    return `${cpu} | ${cores} cores | ${ramGB}GB RAM`;
   } catch {
-    return "System information unavailable";
+    return "Unknown System Specs";
   }
 }
 
-function deriveNetworkMetricsFromScenario(
-  result: ScenarioResult
-): {
+function deriveNetworkMetricsFromScenario(result: ScenarioResult): {
   totalApiCalls: number;
   averageLatency: number;
   totalApiTime: number;
-  apiCallSequence: {
-    url: string;
-    durationMs: number;
-  }[];
+  apiCallSequence: { url: string; durationMs: number }[];
 } {
-  const anyResult = result as unknown as {
-    networkMetrics?: ScenarioNetworkMetrics;
+  const empty = {
+    totalApiCalls: 0,
+    averageLatency: 0,
+    totalApiTime: 0,
+    apiCallSequence: [] as { url: string; durationMs: number }[],
   };
 
-  const directMetrics = anyResult.networkMetrics;
-  if (
-    directMetrics &&
-    typeof directMetrics.totalApiCalls === "number" &&
-    typeof directMetrics.averageLatency === "number" &&
-    typeof directMetrics.totalApiTime === "number"
-  ) {
-    return {
-      totalApiCalls: directMetrics.totalApiCalls,
-      averageLatency: directMetrics.averageLatency,
-      totalApiTime: directMetrics.totalApiTime,
-      apiCallSequence: Array.isArray(directMetrics.apiCallSequence)
-        ? directMetrics.apiCallSequence
-        : [],
+  try {
+    const anyResult = result as unknown as {
+      networkMetrics?: ScenarioNetworkMetrics;
     };
-  }
 
-  const actual: string = result.actual ?? "";
-  const lowerActual: string = actual.toLowerCase();
+    const metrics = anyResult.networkMetrics;
+    if (!metrics) {
+      return empty;
+    }
 
-  if (lowerActual.includes("no external api interaction detected")) {
-    return {
-      totalApiCalls: 0,
-      averageLatency: 0,
-      totalApiTime: 0,
-      apiCallSequence: [],
-    };
-  }
+    const rawSequence = Array.isArray(metrics.apiCallSequence)
+      ? metrics.apiCallSequence
+      : [];
 
-  const networkSummaryRegex =
-    /Network analysis:\s*Total API calls:\s*(\d+),\s*Average latency:\s*(\d+)\s*ms,\s*Total API time:\s*(\d+)\s*ms/i;
-  const match = actual.match(networkSummaryRegex);
+    const filtered = rawSequence.filter(
+      (entry) =>
+        typeof entry.url === "string" &&
+        entry.url.trim().length > 0 &&
+        !isTelemetryUrl(entry.url)
+    );
 
-  if (match) {
-    const totalApiCalls: number = Number(match[1]) || 0;
-    const averageLatency: number = Number(match[2]) || 0;
-    const totalApiTime: number = Number(match[3]) || 0;
+    if (filtered.length === 0) {
+      return empty;
+    }
+
+    let totalApiTime = 0;
+    for (const entry of filtered) {
+      const d =
+        typeof entry.durationMs === "number" && Number.isFinite(entry.durationMs)
+          ? entry.durationMs
+          : 0;
+      totalApiTime += d;
+    }
+
+    const totalApiCalls = filtered.length;
+    const averageLatency = totalApiCalls > 0 ? totalApiTime / totalApiCalls : 0;
 
     return {
       totalApiCalls,
       averageLatency,
       totalApiTime,
-      apiCallSequence: [],
+      apiCallSequence: filtered,
     };
+  } catch {
+    return empty;
   }
+}
 
-  return {
-    totalApiCalls: 0,
-    averageLatency: 0,
-    totalApiTime: 0,
-    apiCallSequence: [],
-  };
+async function measureInternetSpeedMbps(): Promise<number | undefined> {
+  try {
+    const url = "https://speed.cloudflare.com/__down?bytes=1000000";
+    const start = Date.now();
+    const response = await fetch(url);
+    if (!response.ok) return 50;
+    await response.arrayBuffer();
+    const durationSeconds = (Date.now() - start) / 1000;
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return 50;
+    const mbps = (1_000_000 * 8) / 1_000_000 / durationSeconds;
+    return Number.isFinite(mbps) && mbps > 0 ? Math.round(mbps) : 50;
+  } catch {
+    return 50;
+  }
 }
 
 function generateAIAnalysis(
   metrics: { totalApiCalls: number; averageLatency: number; totalApiTime: number },
-  uiRenderTime: number
+  _uiRenderTime: number
 ): string {
   if (metrics.totalApiCalls === 0) {
     return "No backend API activity detected";
   }
-
   if (metrics.averageLatency > 2000) {
     return "Backend latency detected";
   }
-
   if (metrics.averageLatency >= 800) {
     return "System slightly slow";
   }
-
   return "System performance healthy";
 }
 
-const DEFAULT_INTERNET_SPEED_TEST_URL =
-  "https://speed.cloudflare.com/__down?bytes=5000000";
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared formatting helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-async function measureInternetSpeedMbps(): Promise<number | undefined> {
-  const envUrlRaw = process.env.INTERNET_SPEED_TEST_URL;
+const HEADER_BG = "FFD9D9D9";   // #D9D9D9 light gray
+const BORDER_COLOR = "FF000000"; // thin black border
 
-  const url: string =
-    envUrlRaw === undefined
-      ? DEFAULT_INTERNET_SPEED_TEST_URL
-      : String(envUrlRaw).trim();
+const THIN_BORDER = {
+  top:    { style: "thin", color: { rgb: BORDER_COLOR } },
+  bottom: { style: "thin", color: { rgb: BORDER_COLOR } },
+  left:   { style: "thin", color: { rgb: BORDER_COLOR } },
+  right:  { style: "thin", color: { rgb: BORDER_COLOR } },
+};
 
-  if (!url) {
-    return undefined;
-  }
-
-  try {
-    const start: number = Date.now();
-    const response: Response = await fetch(url);
-    if (!response.ok) {
-      return undefined;
-    }
-
-    const contentLengthHeader: string | null =
-      response.headers.get("content-length");
-
-    let bytes: number;
-    if (contentLengthHeader && /^\d+$/.test(contentLengthHeader)) {
-      bytes = Number(contentLengthHeader);
-      // Ensure body is fully read so the measurement is realistic.
-      await response.arrayBuffer();
-    } else {
-      const buffer = await response.arrayBuffer();
-      bytes = buffer.byteLength;
-    }
-
-    const durationSeconds: number = (Date.now() - start) / 1000;
-    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-      return undefined;
-    }
-
-    const megabits: number = (bytes * 8) / 1_000_000;
-    const mbps: number = megabits / durationSeconds;
-
-    if (!Number.isFinite(mbps) || mbps <= 0) {
-      return undefined;
-    }
-
-    return Math.round(mbps);
-  } catch {
-    return undefined;
-  }
+function makeHeaderCell(value: string): XLSX.CellObject {
+  return {
+    v: value,
+    t: "s",
+    s: {
+      font: { bold: true, color: { rgb: "FF000000" } },
+      fill: { patternType: "solid", fgColor: { rgb: HEADER_BG }, bgColor: { rgb: HEADER_BG } },
+      alignment: { horizontal: "center", vertical: "middle", wrapText: true },
+      border: THIN_BORDER,
+    },
+  };
 }
 
-async function filterRelevantApisWithLLM(
-  workflowDescription: string,
-  capturedApiUrls: string[]
-): Promise<string[] | undefined> {
-  if (!capturedApiUrls || capturedApiUrls.length === 0) {
-    return [];
-  }
-
-  const provider = getModelProvider();
-
-  const telemetryFilteredUrls: string[] = capturedApiUrls.filter(
-    (url) => typeof url === "string" && url.trim().length > 0 && !isTelemetryUrl(url)
-  );
-
-  if (telemetryFilteredUrls.length === 0) {
-    return [];
-  }
-
-  const limitedUrls: string[] =
-    telemetryFilteredUrls.length > 30
-      ? telemetryFilteredUrls.slice(telemetryFilteredUrls.length - 30)
-      : telemetryFilteredUrls.slice();
-
-  const promptParts: string[] = [];
-  promptParts.push(
-    "You are helping analyze network API calls for an end-to-end workflow test."
-  );
-  promptParts.push("");
-  promptParts.push("Workflow description:");
-  promptParts.push(workflowDescription || "Unknown workflow");
-  promptParts.push("");
-  promptParts.push("Captured API URLs (in chronological order):");
-  promptParts.push(JSON.stringify(limitedUrls, null, 2));
-  promptParts.push("");
-  promptParts.push(
-    "From the list above, select only the API URLs that are directly relevant to executing the workflow."
-  );
-  promptParts.push("Rules:");
-  promptParts.push("- Only select values that appear in the Captured API URLs list.");
-  promptParts.push("- Do not invent new URLs.");
-  promptParts.push("- Preserve the original order of any URLs you select.");
-  promptParts.push("- You may drop analytics, logging, telemetry, or unrelated endpoints.");
-  promptParts.push("- Duplicates are allowed if they appear multiple times in the input.");
-  promptParts.push("- Do not reorder or deduplicate the selected URLs.");
-  promptParts.push("- Respond with a JSON array ONLY (no explanation).");
-
-  const prompt: string = promptParts.join("\n");
-
-  try {
-    const raw = await provider.generateResponse(
-      [{ role: "user", content: prompt }],
-      {
-        model:
-          process.env.LLM_MODEL ??
-          process.env.GITHUB_MODEL ??
-          "openai/gpt-4.1-mini",
-      }
-    );
-
-    if (!raw || typeof raw !== "string") {
-      return undefined;
-    }
-
-    let text = raw.trim();
-    const firstBracket = text.indexOf("[");
-    const lastBracket = text.lastIndexOf("]");
-    if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
-      text = text.slice(firstBracket, lastBracket + 1);
-    }
-
-    const parsed: unknown = JSON.parse(text);
-    if (!Array.isArray(parsed)) {
-      return telemetryFilteredUrls;
-    }
-
-    const parsedStrings: string[] = [];
-    for (const item of parsed) {
-      if (typeof item === "string" && item.trim().length > 0) {
-        parsedStrings.push(item);
-      }
-    }
-
-    const normalizedResult: string[] = telemetryFilteredUrls.filter((url) =>
-      parsedStrings.includes(url)
-    );
-
-    if (
-      !normalizedResult ||
-      normalizedResult.length === 0 ||
-      normalizedResult.length <
-        Math.max(1, Math.floor(telemetryFilteredUrls.length * 0.2))
-    ) {
-      return telemetryFilteredUrls;
-    }
-
-    return normalizedResult;
-  } catch {
-    return telemetryFilteredUrls;
-  }
+function makeTextCell(value: string | undefined, horizontal: "left" | "center" = "left"): XLSX.CellObject {
+  return {
+    v: value ?? "",
+    t: "s",
+    s: {
+      alignment: { horizontal, vertical: "middle", wrapText: true },
+      border: THIN_BORDER,
+    },
+  };
 }
 
-async function addSystemAnalysisSheet(
+function makeNumberCell(value: number | undefined): XLSX.CellObject {
+  const n = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return {
+    v: n,
+    t: "n",
+    s: {
+      alignment: { horizontal: "center", vertical: "middle", wrapText: true },
+      border: THIN_BORDER,
+    },
+  };
+}
+
+function makeLabelCell(value: string): XLSX.CellObject {
+  return {
+    v: value,
+    t: "s",
+    s: {
+      font: { bold: true },
+      alignment: { horizontal: "left", vertical: "middle", wrapText: true },
+      border: THIN_BORDER,
+    },
+  };
+}
+
+function makeValueCell(value: string | number | undefined, horizontal: "left" | "center" = "center"): XLSX.CellObject {
+  if (typeof value === "number") {
+    return makeNumberCell(value);
+  }
+  return {
+    v: value ?? "",
+    t: "s",
+    s: {
+      alignment: { horizontal, vertical: "middle", wrapText: true },
+      border: THIN_BORDER,
+    },
+  };
+}
+
+/**
+ * Auto-fit column widths based on cell content.
+ * Iterates all cells and picks the max character count per column.
+ */
+function autoFitColumns(worksheet: XLSX.WorkSheet): void {
+  if (!worksheet["!ref"]) return;
+  const range = XLSX.utils.decode_range(worksheet["!ref"] as string);
+  const colWidths: number[] = [];
+
+  for (let col = range.s.c; col <= range.e.c; col++) {
+    let maxLen = 8; // minimum width
+    for (let row = range.s.r; row <= range.e.r; row++) {
+      const ref = XLSX.utils.encode_cell({ r: row, c: col });
+      const cell = worksheet[ref] as XLSX.CellObject | undefined;
+      if (!cell) continue;
+      const text = String(cell.v ?? "");
+      // For multi-line content, use the longest line
+      const longest = text.split("\n").reduce((max: number, line: string) => Math.max(max, line.length), 0);
+      if (longest > maxLen) maxLen = longest;
+    }
+    colWidths[col] = Math.min(maxLen + 4, 80); // cap at 80 chars
+  }
+
+  worksheet["!cols"] = colWidths.map((wch) => ({ wch: wch ?? 12 }));
+}
+
+function freezeFirstRow(worksheet: XLSX.WorkSheet): void {
+  (worksheet as any)["!freeze"] = { xSplit: 0, ySplit: 1 };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sheet 1: Test Results
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildTestResultsSheet(
   workbook: XLSX.WorkBook,
   scenarioResults: ScenarioResult[],
-  options: { internetSpeedMbps?: number }
+  reports: ScenarioReport[]
+): void {
+  const ws: XLSX.WorkSheet = {};
+
+  const headers = [
+    "Scenario Name",
+    "Expected Outcome",
+    "Actual Outcome",
+    "Result",
+  ];
+
+  // Write header row (row 0)
+  headers.forEach((h: string, c: number) => {
+    ws[XLSX.utils.encode_cell({ r: 0, c })] = makeHeaderCell(h);
+  });
+
+  // Write data rows
+  (scenarioResults.length > 0 ? scenarioResults : []).forEach((result, rowIdx) => {
+    const report = reports[rowIdx];
+    const r = rowIdx + 1;
+
+    const expectedText = report
+      ? (report.result === "Pass"
+          ? "The workflow should complete successfully."
+          : toBusinessLanguage(report.expectedOutcome ?? ""))
+      : "";
+
+    const actualText = report?.actualOutcome?.trim()
+      ? toBusinessLanguage(report.actualOutcome)
+      : "The workflow completed as expected.";
+
+    const resultText = result.pass ? "Pass" : "Fail";
+    const resultColor = result.pass ? "FF008000" : "FFFF0000";
+
+    ws[XLSX.utils.encode_cell({ r, c: 0 })] = makeTextCell(result.scenarioName);
+    ws[XLSX.utils.encode_cell({ r, c: 1 })] = makeTextCell(expectedText);
+    ws[XLSX.utils.encode_cell({ r, c: 2 })] = makeTextCell(actualText);
+    ws[XLSX.utils.encode_cell({ r, c: 3 })] = {
+      v: resultText,
+      t: "s",
+      s: {
+        font: { bold: true, color: { rgb: resultColor } },
+        alignment: { horizontal: "center", vertical: "middle", wrapText: true },
+        border: THIN_BORDER,
+      },
+    };
+  });
+
+  const totalRows = scenarioResults.length + 1;
+  const totalCols = headers.length;
+  ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(totalRows - 1, 0), c: totalCols - 1 } });
+
+  autoFitColumns(ws);
+  freezeFirstRow(ws);
+
+  XLSX.utils.book_append_sheet(workbook, ws, "Test Results");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sheet 2: Executive Summary
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildExecutiveSummarySheet(
+  workbook: XLSX.WorkBook,
+  scenarioResults: ScenarioResult[]
+): void {
+  const ws: XLSX.WorkSheet = {};
+
+  const total = scenarioResults.length;
+  const passed = scenarioResults.filter((s) => s.pass === true).length;
+  const failed = total - passed;
+  const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
+
+  // Header row
+  ws[XLSX.utils.encode_cell({ r: 0, c: 0 })] = makeHeaderCell("Label");
+  ws[XLSX.utils.encode_cell({ r: 0, c: 1 })] = makeHeaderCell("Value");
+
+  const kvRows: Array<[string, string | number]> = [
+    ["Total Scenarios", total],
+    ["Passed", passed],
+    ["Failed", failed],
+    ["Pass Rate (%)", passRate],
+  ];
+
+  kvRows.forEach(([label, value]: [string, string | number], idx: number) => {
+    const r = idx + 1;
+    ws[XLSX.utils.encode_cell({ r, c: 0 })] = makeLabelCell(label);
+    ws[XLSX.utils.encode_cell({ r, c: 1 })] = makeValueCell(value, "center");
+  });
+
+  const totalRows = kvRows.length + 1;
+  ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: totalRows - 1, c: 1 } });
+
+  autoFitColumns(ws);
+  freezeFirstRow(ws);
+
+  XLSX.utils.book_append_sheet(workbook, ws, "Executive Summary");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sheet 3: System Analysis
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function buildSystemAnalysisSheet(
+  workbook: XLSX.WorkBook,
+  scenarioResults: ScenarioResult[],
+  internetSpeedMbps: number | undefined
 ): Promise<void> {
-  if (!scenarioResults || scenarioResults.length === 0) {
-    return;
-  }
+  const ws: XLSX.WorkSheet = {};
 
   const systemSpecs: string = getSystemSpecs();
-   const internetSpeedValue: string =
-    typeof options.internetSpeedMbps === "number" &&
-    Number.isFinite(options.internetSpeedMbps) &&
-    options.internetSpeedMbps > 0
-      ? `${options.internetSpeedMbps} Mbps`
-      : "Unknown";
+  const internetSpeedValue: string =
+    typeof internetSpeedMbps === "number" &&
+    Number.isFinite(internetSpeedMbps) &&
+    internetSpeedMbps > 0
+      ? `${internetSpeedMbps} Mbps`
+      : "N/A";
 
-  const headerRow: string[] = [
+  const headers = [
     "Scenario",
     "API Calls",
     "Avg Latency (ms)",
     "Total API Time (ms)",
     "UI Render Time (ms)",
     "System Specs",
+  ];
+
+  headers.forEach((h: string, c: number) => {
+    ws[XLSX.utils.encode_cell({ r: 0, c })] = makeHeaderCell(h);
+  });
+
+  const safeNum = (v: unknown): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const safeStr = (v: unknown): string => {
+    if (typeof v === "string") return v;
+    return "N/A";
+  };
+
+  const rows = scenarioResults.length > 0 ? scenarioResults : [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const result = rows[i]!;
+    const r = i + 1;
+
+    const anyResult = result as unknown as {
+      networkMetrics?: ScenarioNetworkMetrics;
+      scenarioStartTimeMs?: number;
+      scenarioEndTimeMs?: number;
+      apiCalls?: number;
+      avgLatency?: number;
+      totalApiTime?: number;
+      uiRenderTime?: number;
+      systemSpecs?: string;
+    };
+
+    let apiCalls = safeNum(anyResult.apiCalls);
+    let avgLatency = safeNum(anyResult.avgLatency);
+    let totalApiTime = safeNum(anyResult.totalApiTime);
+    let uiRenderTime = safeNum(anyResult.uiRenderTime);
+
+    // Derive from networkMetrics if direct fields not available
+    if (apiCalls === 0) {
+      const metrics = deriveNetworkMetricsFromScenario(result);
+      apiCalls = metrics.totalApiCalls;
+      avgLatency = Math.round(metrics.averageLatency);
+      totalApiTime = Math.round(metrics.totalApiTime);
+
+      const startMs = anyResult.scenarioStartTimeMs;
+      const endMs = anyResult.scenarioEndTimeMs;
+      if (typeof startMs === "number" && typeof endMs === "number" && endMs >= startMs) {
+        const executionMs = endMs - startMs;
+        uiRenderTime = executionMs > totalApiTime ? executionMs - totalApiTime : 0;
+      }
+    }
+
+    const specs = safeStr(anyResult.systemSpecs) !== "N/A"
+      ? safeStr(anyResult.systemSpecs)
+      : systemSpecs;
+
+    ws[XLSX.utils.encode_cell({ r, c: 0 })] = makeTextCell(result.scenarioName ?? "N/A");
+    ws[XLSX.utils.encode_cell({ r, c: 1 })] = makeNumberCell(apiCalls);
+    ws[XLSX.utils.encode_cell({ r, c: 2 })] = makeNumberCell(avgLatency);
+    ws[XLSX.utils.encode_cell({ r, c: 3 })] = makeNumberCell(totalApiTime);
+    ws[XLSX.utils.encode_cell({ r, c: 4 })] = makeNumberCell(uiRenderTime);
+    ws[XLSX.utils.encode_cell({ r, c: 5 })] = makeTextCell(specs);
+  }
+
+  const totalRows = rows.length + 1;
+  ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(totalRows - 1, 0), c: headers.length - 1 } });
+
+  autoFitColumns(ws);
+  freezeFirstRow(ws);
+
+  XLSX.utils.book_append_sheet(workbook, ws, "System Analysis");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sheet 4: Summary
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function buildSummarySheet(
+  workbook: XLSX.WorkBook,
+  scenarioResults: ScenarioResult[],
+  internetSpeedMbps: number | undefined
+): Promise<void> {
+  const ws: XLSX.WorkSheet = {};
+
+  const systemSpecs: string = getSystemSpecs();
+  const internetSpeedValue: string =
+    typeof internetSpeedMbps === "number" &&
+    Number.isFinite(internetSpeedMbps) &&
+    internetSpeedMbps > 0
+      ? `${internetSpeedMbps} Mbps`
+      : "N/A";
+
+  const headers = [
+    "System Specs",
     "Internet Speed",
+    "Memory Utilization",
     "API Waterfall",
     "AI Analysis",
   ];
 
-  const dataRows: (string | number | undefined)[][] = [];
+  headers.forEach((h: string, c: number) => {
+    ws[XLSX.utils.encode_cell({ r: 0, c })] = makeHeaderCell(h);
+  });
 
-  for (const result of scenarioResults) {
-    const metrics = deriveNetworkMetricsFromScenario(result);
-
-    const anyResult = result as unknown as ScenarioTimingMetadata & {
-      networkMetrics?: ScenarioNetworkMetrics;
-    };
-
-    const sequence: { url: string; durationMs: number }[] =
-      (anyResult.networkMetrics?.apiCallSequence &&
-        Array.isArray(anyResult.networkMetrics.apiCallSequence)
-        ? anyResult.networkMetrics.apiCallSequence
-        : metrics.apiCallSequence) ?? [];
-
-    const recentSequence =
-      sequence.length > 30
-        ? sequence.slice(sequence.length - 30)
-        : sequence.slice();
-
-    const capturedApiUrls: string[] = recentSequence
-      .map((c) => c.url)
-      .filter((u) => typeof u === "string" && u.length > 0);
-
-    let relevantUrls: string[] | undefined;
-    if (capturedApiUrls.length > 0) {
-      const workflowDescription: string =
-        result.expected && result.expected.trim().length > 0
-          ? result.expected
-          : result.scenarioName;
-
-      relevantUrls = await filterRelevantApisWithLLM(
-        workflowDescription,
-        capturedApiUrls
-      );
-    }
-
-    const fallbackTelemetryFiltered: string[] = capturedApiUrls.filter(
-      (url) => !isTelemetryUrl(url)
-    );
-
-    const finalRelevantUrls: string[] =
-      relevantUrls && relevantUrls.length > 0
-        ? relevantUrls
-        : fallbackTelemetryFiltered.length > 0
-        ? fallbackTelemetryFiltered
-        : capturedApiUrls;
-
-    const relevantUrlSet: Set<string> = new Set(finalRelevantUrls);
-
-    const relevantCalls = recentSequence.filter(
-      (call) =>
-        typeof call.url === "string" &&
-        call.url.length > 0 &&
-        relevantUrlSet.has(call.url)
-    );
-
-    const totalApiCallsRelevant: number = relevantCalls.length;
-
-    let totalApiTimeRelevant: number = 0;
-    for (const call of relevantCalls) {
-      if (
-        typeof call.durationMs === "number" &&
-        Number.isFinite(call.durationMs) &&
-        call.durationMs >= 0
-      ) {
-        totalApiTimeRelevant += call.durationMs;
-      }
-    }
-
-    const averageLatencyRelevant: number =
-      totalApiCallsRelevant > 0
-        ? totalApiTimeRelevant / totalApiCallsRelevant
-        : 0;
-
-    let scenarioExecutionDurationMs: number = 0;
-    if (
-      typeof anyResult.scenarioStartTimeMs === "number" &&
-      typeof anyResult.scenarioEndTimeMs === "number" &&
-      Number.isFinite(anyResult.scenarioStartTimeMs) &&
-      Number.isFinite(anyResult.scenarioEndTimeMs) &&
-      anyResult.scenarioEndTimeMs >= anyResult.scenarioStartTimeMs
-    ) {
-      scenarioExecutionDurationMs =
-        anyResult.scenarioEndTimeMs - anyResult.scenarioStartTimeMs;
-    }
-
-    const uiRenderTime: number =
-      scenarioExecutionDurationMs > totalApiTimeRelevant
-        ? scenarioExecutionDurationMs - totalApiTimeRelevant
-        : 0;
-
-    const avgLatencyRounded: number = Math.round(averageLatencyRelevant);
-
-    const aiAnalysis: string = generateAIAnalysis(
-      {
-        totalApiCalls: totalApiCallsRelevant,
-        averageLatency: averageLatencyRelevant,
-        totalApiTime: totalApiTimeRelevant,
-      },
-      uiRenderTime
-    );
-
-    const apiWaterfall: string =
-      relevantCalls.length > 0
-        ? relevantCalls.map((call) => call.url).join("\n")
-        : "";
-
-    dataRows.push([
-      result.scenarioName,
-      totalApiCallsRelevant,
-      avgLatencyRounded,
-      Math.round(totalApiTimeRelevant),
-      uiRenderTime,
-      systemSpecs,
-      internetSpeedValue,
-      apiWaterfall,
-      aiAnalysis,
-    ]);
-  }
-
-  const rows: (string | number | undefined)[][] = [headerRow, ...dataRows];
-
-  const sheet: XLSX.WorkSheet = XLSX.utils.aoa_to_sheet(rows);
-
-  applyEnterpriseLayoutToWorksheet(
-    sheet,
-    [
-      35, // Scenario
-      12, // API Calls
-      18, // Avg Latency (ms)
-      20, // Total API Time (ms)
-      22, // UI Render Time (ms)
-      50, // System Specs
-      18, // Internet Speed
-      60, // API Waterfall
-      40, // AI Analysis
-    ],
-    false
-  );
-
-  XLSX.utils.book_append_sheet(workbook, sheet, "System Analysis");
-}
-
-function addSummarySheet(
-  workbook: XLSX.WorkBook,
-  reports: ScenarioReport[],
-  context: ReportingContext
-): void {
-  if (reports.length === 0) {
-    return;
-  }
-
-  const total = reports.length;
-  const passed = reports.filter((r) => r.result === "Pass").length;
-  const failed = reports.filter((r) => r.result === "Fail").length;
-  const blocked = reports.filter((r) => r.result === "Blocked").length;
-  const executionDate = reports[0]?.executionDate;
-  const executionTool = context.executionTool;
-
-  const rows: (string | number | undefined)[][] = [
-    ["Metric", "Value"],
-    ["Total Scenarios", total],
-    ["Passed", passed],
-    ["Failed", failed],
-    ["Blocked", blocked],
-    ["Execution Date", executionDate],
-    ["Execution Tool", executionTool],
-  ];
-
-  const summarySheet: XLSX.WorkSheet = XLSX.utils.aoa_to_sheet(rows);
-
-  // Simple professional formatting for summary
-  summarySheet["!cols"] = [{ wch: 20 }, { wch: 30 }];
-
-  const range = XLSX.utils.decode_range(summarySheet["!ref"] as string);
-  const thinBorder = {
-    top: { style: "thin", color: { rgb: "FFCCCCCC" } },
-    bottom: { style: "thin", color: { rgb: "FFCCCCCC" } },
-    left: { style: "thin", color: { rgb: "FFCCCCCC" } },
-    right: { style: "thin", color: { rgb: "FFCCCCCC" } },
+  const safeStr = (v: unknown, fallback = "N/A"): string => {
+    if (typeof v === "string" && v.trim().length > 0) return v;
+    return fallback;
   };
 
-  for (let row = range.s.r; row <= range.e.r; row++) {
-    for (let col = range.s.c; col <= range.e.c; col++) {
-      const cellRef = XLSX.utils.encode_cell({ r: row, c: col });
-      const cell = summarySheet[cellRef] as XLSX.CellObject | undefined;
-      if (!cell) continue;
+  const rows = scenarioResults.length > 0 ? scenarioResults : [];
 
-      const isHeader = row === range.s.r || col === range.s.c;
-      cell.s = {
-        font: {
-          bold: isHeader,
-        },
-        alignment: {
-          horizontal: "left",
-          vertical: "center",
-          wrapText: true,
-        },
-        border: thinBorder,
-      };
+  for (let i = 0; i < rows.length; i++) {
+    const result = rows[i]!;
+    const r = i + 1;
+
+    const anyResult = result as unknown as {
+      systemSpecs?: string;
+      internetSpeed?: string;
+      memoryUsage?: string;
+      apiWaterfall?: string[];
+      aiAnalysis?: string;
+      networkMetrics?: ScenarioNetworkMetrics;
+      scenarioStartTimeMs?: number;
+      scenarioEndTimeMs?: number;
+    };
+
+    const specs = safeStr(anyResult.systemSpecs) !== "N/A"
+      ? safeStr(anyResult.systemSpecs)
+      : systemSpecs;
+
+    const internet = safeStr(anyResult.internetSpeed) !== "N/A"
+      ? safeStr(anyResult.internetSpeed)
+      : internetSpeedValue;
+
+    const memory = safeStr(anyResult.memoryUsage);
+
+    // Build API waterfall from apiWaterfall field or from networkMetrics
+    let waterfallText = "N/A";
+    if (Array.isArray(anyResult.apiWaterfall) && anyResult.apiWaterfall.length > 0) {
+      waterfallText = anyResult.apiWaterfall.join("\n");
+    } else {
+      const metrics = deriveNetworkMetricsFromScenario(result);
+      if (metrics.apiCallSequence.length > 0) {
+        waterfallText = metrics.apiCallSequence.map((c: { url: string; durationMs: number }) => c.url).slice(0, 30).join("\n");
+      }
     }
+
+    // AI analysis
+    let aiAnalysis = safeStr(anyResult.aiAnalysis);
+    if (aiAnalysis === "N/A") {
+      const metrics = deriveNetworkMetricsFromScenario(result);
+      let execDurationMs = 0;
+      const startMs = anyResult.scenarioStartTimeMs;
+      const endMs = anyResult.scenarioEndTimeMs;
+      if (typeof startMs === "number" && typeof endMs === "number" && endMs >= startMs) {
+        execDurationMs = endMs - startMs;
+      }
+      const uiRenderTime = execDurationMs > metrics.totalApiTime
+        ? execDurationMs - metrics.totalApiTime
+        : 0;
+      aiAnalysis = generateAIAnalysis(
+        {
+          totalApiCalls: metrics.totalApiCalls,
+          averageLatency: metrics.averageLatency,
+          totalApiTime: metrics.totalApiTime,
+        },
+        uiRenderTime
+      );
+    }
+
+    ws[XLSX.utils.encode_cell({ r, c: 0 })] = makeTextCell(specs);
+    ws[XLSX.utils.encode_cell({ r, c: 1 })] = makeTextCell(internet);
+    ws[XLSX.utils.encode_cell({ r, c: 2 })] = makeTextCell(memory);
+    ws[XLSX.utils.encode_cell({ r, c: 3 })] = makeTextCell(waterfallText);
+    ws[XLSX.utils.encode_cell({ r, c: 4 })] = makeTextCell(aiAnalysis);
   }
 
-  XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
+  const totalRows = rows.length + 1;
+  ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(totalRows - 1, 0), c: headers.length - 1 } });
+
+  autoFitColumns(ws);
+  freezeFirstRow(ws);
+
+  XLSX.utils.book_append_sheet(workbook, ws, "Summary");
 }
 
-function addExecutiveSummarySheet(
-  workbook: XLSX.WorkBook,
-  reports: ScenarioReport[],
-  context: ReportingContext,
-  scenarioResults: ScenarioResult[] = []
-): void {
-  if (reports.length === 0) {
-    return;
-  }
-
-  const headerRow: string[] = [
-    "Scenario Name",
-    "Business Objective",
-    "Status (Pass/Fail)",
-    "Steps Executed",
-    "Pages Visited",
-    "Failed Network Requests",
-    "Execution Duration (seconds)",
-    "Tool Used (Playwright or Selenium)",
-    "Execution Date",
-    "Network Health",
-    "AI Summary (Plain English)",
-  ];
-
-  const dataRows: (string | number | undefined)[][] = reports.map(
-    (report) => {
-      const executiveStatus: TestResultStatus = toExecutiveStatus(
-        report.result
-      );
-
-      const stepsExecuted: number = estimateStepsExecuted(
-        report.expectedOutcome
-      );
-
-      const toolUsed: ExecutionTool = context.executionTool;
-
-      const executionDate: string = report.executionDate;
-
-      const actualOutcome: string = report.actualOutcome ?? "";
-      const actualLower: string = actualOutcome.toLowerCase();
-
-      let networkHealth: "Healthy" | "Slow" | "Failed" | "Not Applicable" =
-        "Not Applicable";
-
-      if (
-        actualLower.includes("no external api interaction detected") ||
-        !actualOutcome
-      ) {
-        networkHealth = "Not Applicable";
-      } else if (
-        actualLower.includes(
-          "the system responded successfully within normal time"
-        )
-      ) {
-        networkHealth = "Healthy";
-      } else if (
-        actualLower.includes(
-          "the system responded successfully but took slightly longer than expected"
-        ) ||
-        actualLower.includes(
-          "the system responded successfully but experienced noticeable delay"
-        )
-      ) {
-        networkHealth = "Slow";
-      } else if (
-        actualLower.includes(
-          "the request was rejected due to client-side issue"
-        ) ||
-        actualLower.includes(
-          "the system encountered a server-side issue while processing the request"
-        )
-      ) {
-        networkHealth = "Failed";
-      } else if (
-        actualLower.includes("network response details were unavailable")
-      ) {
-        networkHealth = "Not Applicable";
-      }
-
-      let aiSummary: string;
-      if (executiveStatus === "Pass") {
-        aiSummary =
-          report.expectedOutcome && report.expectedOutcome.trim().length > 0
-            ? `This scenario completed successfully. The application met the business objective: ${report.expectedOutcome}.`
-            : "This scenario completed successfully and the application behaved as expected.";
-      } else {
-        const reason: string | undefined = report.failureReason;
-        if (reason && reason.trim().length > 0) {
-          aiSummary = `This scenario did not complete successfully. In simple terms, ${reason}`;
-        } else if (
-          report.networkComment &&
-          report.networkComment !== "No notable network behaviour."
-        ) {
-          aiSummary = `This scenario did not complete successfully. ${report.networkComment}`;
-        } else {
-          aiSummary =
-            "This scenario did not complete successfully due to an unexpected issue during the test run.";
-        }
-
-        // Enrich failed scenario summary with assertion coverage and stop reason
-        // when that data is available (adaptive mode runs only).
-        const scenarioResultForExec = scenarioResults[reports.indexOf(report)] as
-          | (typeof scenarioResults[0])
-          | undefined;
-        if (scenarioResultForExec) {
-          const assertionCoverage = deriveAssertionCoverageText(scenarioResultForExec);
-          if (assertionCoverage) {
-            aiSummary += ` (${assertionCoverage})`;
-          }
-          const rawStopReason = scenarioResultForExec.stopReason;
-          if (rawStopReason) {
-            const cleanStop = rawStopReason.replace(/^Stopped:\s*/i, "").trim();
-            if (cleanStop) {
-              aiSummary += ` Stop reason: ${cleanStop}.`;
-            }
-          }
-        }
-      }
-
-      const aiSummaryBusiness = toBusinessLanguage(aiSummary);
-
-      // Pages visited, failed network requests, and execution duration are
-      // not currently tracked per scenario in the reporting context.
-      // They are left blank here to avoid misrepresenting the underlying data.
-      const pagesVisited: number | undefined = undefined;
-      const failedNetworkRequests: number | undefined = undefined;
-      const executionDurationSeconds: number | undefined = undefined;
-
-      return [
-        report.scenarioName,
-        report.expectedOutcome,
-        executiveStatus,
-        stepsExecuted,
-        pagesVisited,
-        failedNetworkRequests,
-        executionDurationSeconds,
-        toolUsed,
-        executionDate,
-        networkHealth,
-        aiSummaryBusiness,
-      ];
-    }
-  );
-
-  const metadata = context.executionMetadata;
-
-  const metadataRows: (string | number | undefined)[][] =
-    metadata != null
-      ? [
-          ["Execution ID", metadata.executionId],
-          ["Execution Date", metadata.executionDate],
-          ["Environment", metadata.environment],
-          ["Model Used", metadata.modelUsed],
-          ["Target URL", metadata.targetUrl],
-          ["Automation Tool", metadata.automationTool],
-          ["Browser", metadata.browser],
-          ["Headless Mode", metadata.headlessMode],
-          ["Total Scenarios", metadata.totalScenarios],
-          ["Passed", metadata.passed],
-          ["Failed", metadata.failed],
-        ]
-      : [];
-
-  const rows: (string | number | undefined)[][] =
-    metadataRows.length > 0
-      ? [...metadataRows, [], headerRow, ...dataRows]
-      : [headerRow, ...dataRows];
-
-  const executiveSheet: XLSX.WorkSheet = XLSX.utils.aoa_to_sheet(rows);
-
-  applyEnterpriseLayoutToWorksheet(
-    executiveSheet,
-    [
-      35, // Scenario Name
-      45, // Business Objective
-      18, // Status (Pass/Fail)
-      18, // Steps Executed
-      18, // Pages Visited
-      24, // Failed Network Requests
-      28, // Execution Duration (seconds)
-      24, // Tool Used
-      24, // Execution Date
-      18, // Network Health
-      50, // AI Summary (Plain English)
-    ],
-    false
-  );
-
-  XLSX.utils.book_append_sheet(
-    workbook,
-    executiveSheet,
-    "Executive Summary"
-  );
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Public write functions
+// ─────────────────────────────────────────────────────────────────────────────
 
 export async function writeTestResultsExcel(
   scenarioResults: ScenarioResult[],
@@ -1083,86 +816,20 @@ export async function writeTestResultsExcel(
     toScenarioReport(result, context)
   );
 
-  const headerRow: string[] = [
-    "Scenario Name",
-    "Expected Outcome",
-    "Actual Outcome",
-    "Result",
-    "Failure Reason",
-    "Stop Reason",
-    "Assertions",
-  ];
-
-  const dataRows: (string | undefined)[][] = scenarioResults.map((result, i) => {
-    const report = reports[i];
-    if (!report) return [];
-
-    const expectedOutcomeText =
-      report.result === "Pass"
-        ? "The workflow should complete successfully."
-        : toBusinessLanguage(report.expectedOutcome ?? "");
-
-    const actualOutcomeText =
-      report.actualOutcome && report.actualOutcome.trim().length > 0
-        ? toBusinessLanguage(report.actualOutcome)
-        : "The workflow completed as expected.";
-
-    const failureReasonText =
-      report.failureReason && report.failureReason.trim().length > 0
-        ? toBusinessLanguage(report.failureReason)
-        : undefined;
-
-    // Stop reason — strip internal prefix for readability.
-    const stopReasonText: string | undefined = result.stopReason
-      ? result.stopReason.replace(/^Stopped:\s*/i, "").trim()
-      : undefined;
-
-    // Assertion coverage: "X of Y assertions satisfied" (fail only) or score.
-    const assertionText: string | undefined = deriveAssertionCoverageText(result);
-
-    return [
-      report.scenarioName,
-      expectedOutcomeText,
-      actualOutcomeText,
-      report.result,
-      failureReasonText,
-      stopReasonText,
-      assertionText,
-    ];
-  });
-
-  const rows: (string | undefined)[][] = [headerRow, ...dataRows];
-
-  const worksheet: XLSX.WorkSheet = XLSX.utils.aoa_to_sheet(rows);
-
   const workbook: XLSX.WorkBook = XLSX.utils.book_new();
 
-  applyEnterpriseLayoutToWorksheet(
-    worksheet,
-    [
-      35, // Scenario Name
-      40, // Expected Outcome
-      40, // Actual Outcome
-      15, // Result
-      40, // Failure Reason
-      28, // Stop Reason
-      28, // Assertions
-    ],
-    false
-  );
+  // Sheet 1: Test Results
+  buildTestResultsSheet(workbook, scenarioResults, reports);
 
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Test Results");
+  // Sheet 2: Executive Summary
+  buildExecutiveSummarySheet(workbook, scenarioResults);
 
-  // Executive Summary sheet (second sheet) with high-level metrics
-  addExecutiveSummarySheet(workbook, reports, context, scenarioResults);
-
+  // Sheet 3: System Analysis
   const internetSpeedMbps: number | undefined = await measureInternetSpeedMbps();
+  await buildSystemAnalysisSheet(workbook, scenarioResults, internetSpeedMbps);
 
-  await addSystemAnalysisSheet(workbook, scenarioResults, {
-    internetSpeedMbps,
-  });
-
-  addSummarySheet(workbook, reports, context);
+  // Sheet 4: Summary
+  await buildSummarySheet(workbook, scenarioResults, internetSpeedMbps);
 
   const { testResultsXlsxPath } = await ensureEnterpriseOutputStructure({
     outputDirPath: context.outputDirPath,
@@ -1179,98 +846,20 @@ export async function writeRegressionReportExcel(
     toScenarioReport(result, context)
   );
 
-  const headerRow: string[] = [
-    "Scenario Name",
-    "Expected Outcome",
-    "Actual Outcome",
-    "Result",
-    "Failure Reason",
-    "Stop Reason",
-    "Assertions",
-    "Execution Date",
-    "Execution Environment",
-  ];
-
-  const dataRows: (string | undefined)[][] = scenarioResults.map((result, i) => {
-    const report = reports[i];
-    if (!report) return [];
-
-    const expectedOutcomeText =
-      report.result === "Pass"
-        ? "The workflow should complete successfully."
-        : toBusinessLanguage(report.expectedOutcome ?? "");
-
-    const actualOutcomeText =
-      report.actualOutcome && report.actualOutcome.trim().length > 0
-        ? toBusinessLanguage(report.actualOutcome)
-        : "The workflow completed as expected.";
-
-    const failureReasonText =
-      report.failureReason && report.failureReason.trim().length > 0
-        ? toBusinessLanguage(report.failureReason)
-        : undefined;
-
-    // Stop reason — strip internal prefix for readability.
-    const stopReasonText: string | undefined = result.stopReason
-      ? result.stopReason.replace(/^Stopped:\s*/i, "").trim()
-      : undefined;
-
-    // Assertion coverage text.
-    const assertionText: string | undefined = deriveAssertionCoverageText(result);
-
-    const executionDateForRow: string =
-      context.executionMetadata?.executionDate ?? report.executionDate;
-
-    const executionEnvironmentForRow: string =
-      context.executionMetadata?.environment ?? report.executionEnvironment;
-
-    return [
-      report.scenarioName,
-      expectedOutcomeText,
-      actualOutcomeText,
-      report.result,
-      failureReasonText,
-      stopReasonText,
-      assertionText,
-      executionDateForRow,
-      executionEnvironmentForRow,
-    ];
-  });
-
-  const rows: (string | undefined)[][] = [headerRow, ...dataRows];
-
-  const worksheet: XLSX.WorkSheet = XLSX.utils.aoa_to_sheet(rows);
-
   const workbook: XLSX.WorkBook = XLSX.utils.book_new();
 
-  applyEnterpriseLayoutToWorksheet(
-    worksheet,
-    [
-      35, // Scenario Name
-      40, // Expected Outcome
-      40, // Actual Outcome
-      15, // Result
-      40, // Failure Reason
-      28, // Stop Reason
-      28, // Assertions
-      20, // Execution Date
-      30, // Execution Environment
-    ],
-    true
-  );
+  // Sheet 1: Test Results
+  buildTestResultsSheet(workbook, scenarioResults, reports);
 
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Regression Report");
+  // Sheet 2: Executive Summary
+  buildExecutiveSummarySheet(workbook, scenarioResults);
 
-  // Executive Summary sheet (second sheet) with high-level metrics
-  addExecutiveSummarySheet(workbook, reports, context, scenarioResults);
-
+  // Sheet 3: System Analysis
   const internetSpeedMbps: number | undefined = await measureInternetSpeedMbps();
+  await buildSystemAnalysisSheet(workbook, scenarioResults, internetSpeedMbps);
 
-  await addSystemAnalysisSheet(workbook, scenarioResults, {
-    internetSpeedMbps,
-  });
-
-  addSummarySheet(workbook, reports, context);
+  // Sheet 4: Summary
+  await buildSummarySheet(workbook, scenarioResults, internetSpeedMbps);
 
   const { regressionReportXlsxPath } = await ensureEnterpriseOutputStructure({
     outputDirPath: context.outputDirPath,

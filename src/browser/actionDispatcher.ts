@@ -103,9 +103,7 @@ function strategyToSelector(strategy: SelectorStrategy): string {
     case "placeholder":
       return `[placeholder="${cssEscape(strategy.value)}"]`;
     case "text":
-      // text= selectors are Playwright-specific; fall back to a broad attribute search.
-      // The Playwright controller's buildSmartLocator will resolve this correctly.
-      return `[value="${cssEscape(strategy.value)}"], button, a, label`;
+      return `button:has-text("${strategy.value}"), a:has-text("${strategy.value}"), [role="button"]:has-text("${strategy.value}")`;
     case "id":
       return `#${cssEscape(strategy.value)}`;
     case "name":
@@ -198,17 +196,35 @@ async function handleClick(
 
   const selector = await resolveLocator(element.selectorRank, probe);
   if (!selector) {
+    console.log("SELECTOR:", "(none resolved)");
+    console.log("SUCCESS:", false);
     return {
       success: false,
       errorMessage: `No selector could be resolved for element index ${element.elementIndex} (${element.tag}).`,
     };
   }
 
+  if (browser.isVisible) {
+    const visible = await browser.isVisible(selector);
+    if (!visible) {
+      console.log("SELECTOR:", selector);
+      console.log("SUCCESS:", false);
+      return {
+        success: false,
+        selectorUsed: selector,
+        errorMessage: `Element not visible: ${selector}`,
+      };
+    }
+  }
+
   try {
+    console.log("SELECTOR:", selector);
     await browser.click(selector);
+    console.log("SUCCESS:", true);
     return { success: true, selectorUsed: selector };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    console.log("SUCCESS:", false);
     return {
       success: false,
       selectorUsed: selector,
@@ -488,17 +504,20 @@ async function handleAssert(
   element: RichElement | undefined,
   assertionType: string | undefined
 ): Promise<DispatchResult> {
-  // ASSERT is an inline check — it does not fail the step on assertion failure;
-  // it returns success=true with a selectorUsed note so the orchestrator can
-  // record the observation. Hard assertion failures should come from
-  // assertionChecker.evaluateAssertions(), not from here.
   if (!element) {
-    return { success: true, selectorUsed: undefined };
+    return {
+      success: false,
+      selectorUsed: undefined,
+      errorMessage: "ASSERT FAILED: no element provided for assertion",
+    };
   }
 
   if (!browser.isVisible) {
-    // Cannot verify visually — treat as a soft pass.
-    return { success: true, selectorUsed: undefined };
+    return {
+      success: false,
+      selectorUsed: undefined,
+      errorMessage: "ASSERT FAILED: browser does not support visibility checks",
+    };
   }
 
   const selector = element.selectorRank.length > 0
@@ -506,20 +525,30 @@ async function handleAssert(
     : "";
 
   if (!selector) {
-    return { success: true, selectorUsed: undefined };
+    return {
+      success: false,
+      selectorUsed: undefined,
+      errorMessage: "ASSERT FAILED: no selector could be built for element",
+    };
   }
 
   try {
     const visible = await browser.isVisible(selector);
+    if (visible) {
+      return { success: true, selectorUsed: selector };
+    }
     return {
-      success: true,
+      success: false,
       selectorUsed: selector,
-      errorMessage: visible
-        ? undefined
-        : `ASSERT (${assertionType ?? "visible"}): element not visible with selector "${selector}"`,
+      errorMessage: `ASSERT FAILED: element not visible or condition not met`,
     };
-  } catch {
-    return { success: true, selectorUsed: selector };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      selectorUsed: selector,
+      errorMessage: `ASSERT FAILED: element not visible or condition not met (${msg})`,
+    };
   }
 }
 
@@ -548,6 +577,7 @@ export async function dispatchAction(
   action: AdaptiveNextAction,
   elements: RichElement[]
 ): Promise<DispatchResult> {
+  console.log("ACTION:", action.type, action.elementIndex !== undefined ? `elementIndex=${action.elementIndex}` : action.selector ?? "");
   switch (action.type) {
     case "STOP": {
       // STOP is not a browser action — signal success so the loop can exit cleanly.

@@ -74,19 +74,32 @@ async function runWorkflow(config) {
     try {
         await (0, state_1.initializeState)();
         // Workflow 1: delegate initial state capture to the Python browser-use agent.
-        const pythonState = await (0, mcpClient_1.runPythonAgent)({
-            url: config.url,
-            username: config.username,
-            password: config.password,
-            instruction: "Log in to the application and navigate to the main page for automated workflow planning.",
-            pythonExecutablePath: config.pythonExecutablePath,
+        // Wrapped in try/catch — if the Python agent fails, continue with empty state.
+        let initialDomSnapshot = "";
+        let initialEndpoints = [];
+        let executionContext = buildExecutionIntelligenceContext({
+            url: "", title: "", dom_snapshot: "", buttons: [], inputs: [], links: [], network_logs: [],
         });
-        const initialDomSnapshot = pythonState.dom_snapshot;
-        const initialEndpoints = Array.from(new Set((pythonState.network_logs ?? [])
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            .map((entry) => entry && typeof entry.url === "string" ? entry.url : "")
-            .filter((url) => url.length > 0)));
-        const executionContext = buildExecutionIntelligenceContext(pythonState);
+        try {
+            const pythonState = await (0, mcpClient_1.runPythonAgent)({
+                url: config.url,
+                username: config.username,
+                password: config.password,
+                instruction: "Log in to the application and navigate to the main page for automated workflow planning.",
+                pythonExecutablePath: config.pythonExecutablePath,
+            });
+            initialDomSnapshot = pythonState.dom_snapshot;
+            initialEndpoints = Array.from(new Set((pythonState.network_logs ?? [])
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                .map((entry) => entry && typeof entry.url === "string" ? entry.url : "")
+                .filter((url) => url.length > 0)));
+            executionContext = buildExecutionIntelligenceContext(pythonState);
+        }
+        catch (pythonError) {
+            const pythonMsg = pythonError instanceof Error ? pythonError.message : String(pythonError);
+            console.error();
+            console.log("Continuing without Python agent state — Playwright session will proceed independently.");
+        }
         // Launch the automation browser for executing the planned steps.
         await browser.launchBrowser();
         await browser.login(config.url, config.username, config.password);
@@ -145,7 +158,7 @@ async function runWorkflow(config) {
                     actualParts.push("UI changed during workflow.");
                 }
                 else {
-                    actualParts.push("No detectable UI change during workflow.");
+                    actualParts.push("UI change not detected via DOM diff (may still be functional change).");
                 }
                 if (networkValidationNotes.length === 0) {
                     actualParts.push("All network validation rules satisfied.");
@@ -239,16 +252,19 @@ async function runWorkflow(config) {
                     }
                 }
                 const actual = actualParts.join(" ");
-                // Assertion-driven pass/fail: use contract assertions when available,
-                // fall back to DOM-diff when the contract was empty.
-                const totalContractAssertions = adaptiveResult.assertionState.fulfilled.length +
+                // Assertion-driven pass/fail: strict — all assertions must be fulfilled.
+                const totalAssertions = adaptiveResult.assertionState.fulfilled.length +
                     adaptiveResult.assertionState.failed.length +
                     adaptiveResult.assertionState.pending.length;
-                const pass = !adaptiveResult.stepExecutionFailed &&
-                    networkValidationNotes.length === 0 &&
-                    (totalContractAssertions > 0
-                        ? adaptiveResult.assertionState.fulfilled.length === totalContractAssertions
-                        : uiChanged);
+                let pass = totalAssertions > 0 &&
+                    adaptiveResult.assertionState.pending.length === 0 &&
+                    adaptiveResult.assertionState.failed.length === 0 &&
+                    !adaptiveResult.stepExecutionFailed;
+                if (adaptiveResult.stopReason.includes("LOOP_DETECTED")) {
+                    if (adaptiveResult.assertionState.pending.length > 0) {
+                        pass = false;
+                    }
+                }
                 const scenarioResult = {
                     scenarioName: workflowDescription,
                     expected,
@@ -357,7 +373,7 @@ async function runWorkflow(config) {
                 actualParts.push("UI changed during workflow.");
             }
             else {
-                actualParts.push("No detectable UI change during workflow.");
+                actualParts.push("UI change not detected via DOM diff (may still be functional change).");
             }
             if (networkValidationNotes.length === 0) {
                 actualParts.push("All network validation rules satisfied.");
@@ -574,6 +590,14 @@ async function adaptiveExecutionLoop(context) {
         phase3Logged = true;
     }
     while (stepCount < maxSteps) {
+        const recentActions = executedSteps.slice(-5);
+        const lastAction = recentActions[recentActions.length - 1];
+        const isRepeating = lastAction &&
+            recentActions.filter(a => a === lastAction).length >= 3;
+        if (isRepeating) {
+            stopReason = "Stopped: LOOP_DETECTED.";
+            break;
+        }
         if (Date.now() > context.deadlineMs) {
             uiNotes += "Timed out during adaptive execution loop. ";
             stopReason = "Stopped: timeout reached.";
@@ -603,10 +627,15 @@ async function adaptiveExecutionLoop(context) {
             stepExecutionFailed = true;
             break;
         }
-        // Hash DOM for stuck detection (unchanged from previous implementation).
+        // Hash DOM for stuck detection.
+        // WAIT, SCROLL, and ASSERT are non-DOM-modifying by design — skip them from the stuck counter.
+        const lastActionType = executedSteps.length > 0
+            ? (executedSteps[executedSteps.length - 1] ?? "").split(":")[0].toUpperCase()
+            : "";
+        const isNonMutatingAction = lastActionType === "WAIT" || lastActionType === "SCROLL" || lastActionType === "ASSERT";
         currentDomHash = hashDomSnapshotStatic(domSnapshot);
-        if (previousDomHash !== null && currentDomHash === previousDomHash) {
-            if (retryCount < 1) {
+        if (previousDomHash !== null && currentDomHash === previousDomHash && !isNonMutatingAction) {
+            if (retryCount < 3) {
                 retryCount += 1;
             }
             else {
@@ -624,7 +653,7 @@ async function adaptiveExecutionLoop(context) {
                 break;
             }
         }
-        else {
+        else if (currentDomHash !== previousDomHash) {
             retryCount = 0;
             previousDomHash = currentDomHash;
         }
@@ -634,9 +663,10 @@ async function adaptiveExecutionLoop(context) {
             .then(() => "")
             .catch(() => "");
         assertionState = (0, assertionChecker_1.evaluateAssertions)(context.assertionContract, assertionState, domSnapshot, scenarioNetworkLogsForAssertion, currentUrl);
+        console.log("ASSERTION STATE:", assertionState);
         // Early exit: all assertions fulfilled — goal reached.
         const hasContract = assertionState.fulfilled.length + assertionState.failed.length + assertionState.pending.length > 0;
-        if (hasContract && assertionState.pending.length === 0 && assertionState.failed.length === 0) {
+        if (hasContract && assertionState.pending.length === 0) {
             stopReason = "Stopped: ALL_FULFILLED.";
             break;
         }
@@ -666,6 +696,20 @@ async function adaptiveExecutionLoop(context) {
             stepExecutionFailed = true;
             break;
         }
+        // If assertions are pending, bias execution toward resolving them.
+        const pendingAssertions = assertionState.pending;
+        if (pendingAssertions.length > 0) {
+            // Prevent useless navigation away from the current goal context.
+            if (nextAction && nextAction.type === "NAVIGATE") {
+                nextAction = { type: "WAIT", milliseconds: 1000 };
+            }
+            // Prevent repeated login loops: if the last 3 steps already included
+            // typing credentials and clicking submit, don't blindly retry login.
+            const lastSteps = executedSteps.slice(-3).join(" ");
+            if (lastSteps.includes("TYPE") && lastSteps.includes("CLICK")) {
+                nextAction = { type: "WAIT", milliseconds: 1000 };
+            }
+        }
         // STOP-gating: reject STOP when there are still pending assertions.
         if (!nextAction || nextAction.type === "STOP") {
             const pendingCount = assertionState.pending.length;
@@ -688,6 +732,13 @@ async function adaptiveExecutionLoop(context) {
             }
             break;
         }
+        // Guard against re-login after form was already submitted.
+        // If "formSubmitted" appears in fulfilled assertions, skip credential actions.
+        if (assertionState.fulfilled.includes("formSubmitted")) {
+            if (nextAction && (nextAction.type === "TYPE" || nextAction.type === "CLICK")) {
+                nextAction = { type: "WAIT", milliseconds: 1000 };
+            }
+        }
         if (Date.now() > context.deadlineMs) {
             uiNotes += "Timed out before executing next action. ";
             stopReason = "Stopped: timeout reached.";
@@ -703,6 +754,10 @@ async function adaptiveExecutionLoop(context) {
             }
             break;
         }
+        // Limit ASSERT spam: after step 5, convert ASSERT to a short WAIT.
+        if (nextAction && nextAction.type === "ASSERT" && stepCount > 5) {
+            nextAction = { type: "WAIT", milliseconds: 1000 };
+        }
         // Dispatch the action using the new dispatcher (supports all 10 action types).
         const dispatcherAction = {
             type: nextAction.type,
@@ -716,6 +771,47 @@ async function adaptiveExecutionLoop(context) {
         };
         try {
             const dispatchResult = await (0, actionDispatcher_1.dispatchAction)(browser, dispatcherAction, richElements);
+            console.log("STEP RESULT:", {
+                success: dispatchResult.success,
+                selector: dispatchResult.selectorUsed,
+                error: dispatchResult.errorMessage
+            });
+            // If an ASSERT action failed, move its corresponding assertion from
+            // pending → failed so assertionState accurately reflects reality.
+            if (dispatcherAction.type === "ASSERT" && !dispatchResult.success) {
+                const assertionHint = dispatcherAction.assertionType ||
+                    dispatchResult.selectorUsed ||
+                    dispatchResult.errorMessage ||
+                    "";
+                const matchIndex = assertionState.pending.findIndex((a) => assertionHint.toLowerCase().includes(a.toLowerCase()) ||
+                    a.toLowerCase().includes(assertionHint.toLowerCase()));
+                if (matchIndex !== -1) {
+                    const failedAssertion = assertionState.pending[matchIndex];
+                    assertionState = {
+                        ...assertionState,
+                        pending: assertionState.pending.filter((_, i) => i !== matchIndex),
+                        failed: [...assertionState.failed, failedAssertion],
+                    };
+                }
+                else if (assertionState.pending.length > 0) {
+                    // Fallback: use last pending, not first.
+                    const fallback = assertionState.pending[assertionState.pending.length - 1];
+                    assertionState = {
+                        ...assertionState,
+                        pending: assertionState.pending.slice(0, -1),
+                        failed: [...assertionState.failed, fallback],
+                    };
+                }
+                else {
+                    // No pending assertions — record the hint label directly.
+                    const failedLabel = assertionHint || "unknown assertion";
+                    assertionState = {
+                        ...assertionState,
+                        failed: [...assertionState.failed, failedLabel],
+                    };
+                }
+                console.log("ASSERT FAILED — moved to assertionState.failed:", assertionState.failed);
+            }
             if (!dispatchResult.success) {
                 if (!retryAttempted) {
                     retryAttempted = true;

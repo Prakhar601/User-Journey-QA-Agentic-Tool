@@ -71,9 +71,12 @@ class BrowserController {
     async click(selector) {
         const page = (0, browserSession_1.getPage)();
         const locator = await this.buildSmartLocator(selector, page);
+        console.log("SELECTOR:", selector);
         await locator.waitFor({ state: "visible", timeout: this.timeoutMs });
         await locator.scrollIntoViewIfNeeded();
-        await locator.click();
+        await locator.click({ timeout: 5000 });
+        await page.waitForTimeout(1000);
+        console.log("SUCCESS:", true);
     }
     async scroll() {
         const page = (0, browserSession_1.getPage)();
@@ -212,76 +215,7 @@ class BrowserController {
         return null;
     }
     async buildSmartLocator(selector, page) {
-        const trimmedSelector = selector.trim();
-        if (!trimmedSelector) {
-            return page.locator(selector);
-        }
-        const baseLocator = page.locator(trimmedSelector).first();
-        try {
-            const info = await baseLocator.evaluate((el) => {
-                const element = el;
-                const getAttr = (name) => element.getAttribute(name);
-                const tagName = element.tagName.toLowerCase();
-                const id = element.id || null;
-                const dataTestId = getAttr("data-testid");
-                const dataTest = getAttr("data-test");
-                const dataQa = getAttr("data-qa");
-                const ariaLabel = getAttr("aria-label");
-                const role = getAttr("role");
-                const placeholder = element.placeholder ??
-                    null;
-                const text = (element.innerText || element.textContent || "").trim();
-                return {
-                    tagName,
-                    id,
-                    dataTestId,
-                    dataTest,
-                    dataQa,
-                    ariaLabel,
-                    role,
-                    placeholder,
-                    text,
-                };
-            });
-            // Selector ranking priority:
-            // 1) data-testid
-            // 2) data-test
-            // 3) data-qa
-            // 4) aria-label
-            // 5) role with visible text
-            // 6) placeholder
-            // 7) element text
-            // 8) id
-            // 9) fallback CSS selector
-            if (info.dataTestId) {
-                return page.getByTestId(info.dataTestId);
-            }
-            if (info.dataTest) {
-                return page.locator(`[data-test="${BrowserController.escapeForAttribute(info.dataTest)}"]`);
-            }
-            if (info.dataQa) {
-                return page.locator(`[data-qa="${BrowserController.escapeForAttribute(info.dataQa)}"]`);
-            }
-            if (info.ariaLabel) {
-                return page.getByLabel(info.ariaLabel);
-            }
-            if (info.role && info.text) {
-                return page.getByRole(info.role, { name: info.text });
-            }
-            if (info.placeholder) {
-                return page.getByPlaceholder(info.placeholder);
-            }
-            if (info.text) {
-                return page.getByText(info.text);
-            }
-            if (info.id) {
-                return page.locator(`#${BrowserController.escapeForAttribute(info.id)}`);
-            }
-            return baseLocator;
-        }
-        catch {
-            return baseLocator;
-        }
+        return page.locator(selector);
     }
     static escapeForAttribute(value) {
         return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
