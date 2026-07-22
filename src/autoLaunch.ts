@@ -2,6 +2,10 @@ import { runWorkflow } from "./core/orchestrator";
 import { executeWithRetry } from "./core/retry";
 import type { WorkflowConfig } from "./core/types";
 
+import { loadEnvFile } from "./ai/loadEnv";
+
+loadEnvFile();
+
 function getEnv(name: string, required = false): string | undefined {
   const v = process.env[name];
   if (required && (!v || v.trim().length === 0)) {

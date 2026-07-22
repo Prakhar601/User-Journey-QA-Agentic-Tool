@@ -568,6 +568,17 @@ function hashDomSnapshotStatic(snapshot) {
     }
     return `${snapshot.length}:${hash}`;
 }
+function getAssertionType(assertion) {
+    if (assertion.startsWith("elementVisible"))
+        return "element";
+    if (assertion.startsWith("textPresent"))
+        return "text";
+    if (assertion.startsWith("textAbsent"))
+        return "text";
+    if (assertion.startsWith("apiCalled"))
+        return "api";
+    return "unknown";
+}
 async function adaptiveExecutionLoop(context) {
     const { browser } = context;
     let stepCount = 0;
@@ -662,7 +673,16 @@ async function adaptiveExecutionLoop(context) {
         const currentUrl = await browser.getDOMSnapshot()
             .then(() => "")
             .catch(() => "");
-        assertionState = (0, assertionChecker_1.evaluateAssertions)(context.assertionContract, assertionState, domSnapshot, scenarioNetworkLogsForAssertion, currentUrl);
+        const newState = (0, assertionChecker_1.evaluateAssertions)(context.assertionContract, assertionState, domSnapshot, scenarioNetworkLogsForAssertion, currentUrl);
+        // Preserve failed assertions — failed is cumulative, never reset.
+        assertionState = {
+            fulfilled: newState.fulfilled,
+            pending: newState.pending,
+            failed: Array.from(new Set([
+                ...assertionState.failed,
+                ...newState.failed,
+            ])),
+        };
         console.log("ASSERTION STATE:", assertionState);
         // Early exit: all assertions fulfilled — goal reached.
         const hasContract = assertionState.fulfilled.length + assertionState.failed.length + assertionState.pending.length > 0;
@@ -708,6 +728,24 @@ async function adaptiveExecutionLoop(context) {
             const lastSteps = executedSteps.slice(-3).join(" ");
             if (lastSteps.includes("TYPE") && lastSteps.includes("CLICK")) {
                 nextAction = { type: "WAIT", milliseconds: 1000 };
+            }
+        }
+        // Generic cycle suppression: track the last 10 actions and penalise
+        // any single action+target combination that has been attempted >= 3 times.
+        // This is purely structural — no workflow knowledge required.
+        if (nextAction && nextAction.type !== "STOP" && nextAction.type !== "WAIT") {
+            const actionFingerprint = nextAction.type +
+                (nextAction.elementIndex !== undefined ? `:el[${nextAction.elementIndex}]` : "") +
+                (nextAction.selector ? `:${nextAction.selector}` : "") +
+                (nextAction.url ? `:${nextAction.url}` : "") +
+                (nextAction.value ? `:${nextAction.value}` : "");
+            const recentFingerprints = executedSteps.slice(-10);
+            const repeatCount = recentFingerprints.filter((s) => s === actionFingerprint).length;
+            if (repeatCount >= 3) {
+                // This exact action has been attempted 3+ times recently without progress.
+                // Force a short wait to break the cycle and give the LLM a fresh signal next step.
+                uiNotes += `Cycle suppressed: "${actionFingerprint}" repeated ${repeatCount} times. `;
+                nextAction = { type: "WAIT", milliseconds: 1500 };
             }
         }
         // STOP-gating: reject STOP when there are still pending assertions.
@@ -757,6 +795,21 @@ async function adaptiveExecutionLoop(context) {
         // Limit ASSERT spam: after step 5, convert ASSERT to a short WAIT.
         if (nextAction && nextAction.type === "ASSERT" && stepCount > 5) {
             nextAction = { type: "WAIT", milliseconds: 1000 };
+        }
+        // Dispatch ASSERT_TEXT for pending textPresent/textAbsent assertions.
+        // When the LLM proposes a non-text action and text assertions are still pending,
+        // intercept and inject an ASSERT_TEXT to validate them against the live DOM.
+        if (nextAction && nextAction.type !== "ASSERT_TEXT") {
+            const pendingTextAssertion = assertionState.pending.find((a) => a.startsWith("textPresent:") || a.startsWith("textAbsent:"));
+            if (pendingTextAssertion) {
+                const isAbsent = pendingTextAssertion.startsWith("textAbsent:");
+                const textValue = pendingTextAssertion.split(":").slice(1).join(":");
+                nextAction = {
+                    type: "ASSERT_TEXT",
+                    value: textValue,
+                    assertionType: isAbsent ? "textAbsent" : "textPresent",
+                };
+            }
         }
         // Dispatch the action using the new dispatcher (supports all 10 action types).
         const dispatcherAction = {
@@ -811,6 +864,66 @@ async function adaptiveExecutionLoop(context) {
                     };
                 }
                 console.log("ASSERT FAILED — moved to assertionState.failed:", assertionState.failed);
+            }
+            if (dispatcherAction.type === "ASSERT" && dispatchResult.success) {
+                if (assertionState.pending.length > 0) {
+                    let matchedIndex = -1;
+                    const selector = dispatchResult.selectorUsed || "";
+                    matchedIndex = assertionState.pending.findIndex((a) => {
+                        if (!selector)
+                            return false;
+                        const type = getAssertionType(a);
+                        // ELEMENT assertions — must match by selector characteristics.
+                        if (type === "element") {
+                            return selector.includes("data-test") || selector.includes("button") || selector.includes("link");
+                        }
+                        // TEXT assertions — only match when selector has text relevance.
+                        if (type === "text") {
+                            return selector.includes("text") || selector.includes("label");
+                        }
+                        // API assertions — never resolvable via UI ASSERT.
+                        if (type === "api") {
+                            return false;
+                        }
+                        return false;
+                    });
+                    if (matchedIndex !== -1) {
+                        const matched = assertionState.pending[matchedIndex];
+                        assertionState = {
+                            ...assertionState,
+                            pending: assertionState.pending.filter((_, i) => i !== matchedIndex),
+                            fulfilled: [...assertionState.fulfilled, matched],
+                        };
+                        console.log("ASSERT SUCCESS — matched:", matched);
+                    }
+                }
+            }
+            // Handle ASSERT_TEXT result — resolve matching text assertion.
+            if (dispatcherAction.type === "ASSERT_TEXT") {
+                const textValue = dispatcherAction.value ?? "";
+                const isAbsent = dispatcherAction.assertionType === "textAbsent";
+                // textPresent: success=true → fulfill. textAbsent: success=false → fulfill.
+                const shouldFulfill = isAbsent ? !dispatchResult.success : dispatchResult.success;
+                const assertionKey = isAbsent ? `textAbsent:${textValue}` : `textPresent:${textValue}`;
+                const matchIdx = assertionState.pending.findIndex((a) => a === assertionKey);
+                if (matchIdx !== -1) {
+                    if (shouldFulfill) {
+                        assertionState = {
+                            ...assertionState,
+                            pending: assertionState.pending.filter((_, i) => i !== matchIdx),
+                            fulfilled: [...assertionState.fulfilled, assertionKey],
+                        };
+                        console.log("ASSERT_TEXT fulfilled:", assertionKey);
+                    }
+                    else {
+                        assertionState = {
+                            ...assertionState,
+                            pending: assertionState.pending.filter((_, i) => i !== matchIdx),
+                            failed: [...assertionState.failed, assertionKey],
+                        };
+                        console.log("ASSERT_TEXT failed:", assertionKey);
+                    }
+                }
             }
             if (!dispatchResult.success) {
                 if (!retryAttempted) {

@@ -29,6 +29,14 @@ import {
   initAssertionState,
   computePartialScore,
 } from "../browser/assertionChecker";
+// ── Phase 2 imports ──────────────────────────────────────────────────────────
+import { runEvaluatorAgent } from "../agents/evaluatorAgent";
+import { classifyFailure } from "../agents/failureClassifier";
+import { scoreScenarioConfidence } from "../agents/confidenceScorer";
+import type { EvaluationResult, FailureClassification, ScenarioConfidence } from "./types";
+// ── Phase 3 imports ──────────────────────────────────────────────────────────
+import { runReflectionAgent } from "../agents/reflectionAgent";
+import type { ReflectionReport } from "./types";
 
 type AutomationToolId = "playwright" | "selenium";
 
@@ -48,6 +56,8 @@ type AutomationController = {
   hover?(selector: string): Promise<void>;
   navigate?(url: string): Promise<void>;
   isVisible?(selector: string): Promise<boolean>;
+  getPageText?(): Promise<string>;
+  dismissOverlay?(): Promise<void>;
 };
 
 let phase4Logged: boolean = false;
@@ -120,7 +130,8 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
       executionContext = buildExecutionIntelligenceContext(pythonState);
     } catch (pythonError) {
       const pythonMsg = pythonError instanceof Error ? pythonError.message : String(pythonError);
-      console.error();
+      // Phase 0 fix: was console.error() with no args (silent). Now logs the message.
+      console.error(`Python agent failed: ${pythonMsg}`);
       console.log("Continuing without Python agent state — Playwright session will proceed independently.");
     }
 
@@ -368,6 +379,70 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
           }
         }
 
+        // ── Phase 2: Evaluation → Classification → Confidence ──────────────
+        // These three calls are deterministic and never throw in caller context.
+        // They run synchronously in terms of business logic (evaluator is async
+        // but only for interface consistency — no I/O is performed inside it).
+
+        // 1. Evaluator: finalise textAbsent assertions and compute authoritative score.
+        const evaluationResult: EvaluationResult = await runEvaluatorAgent({
+          assertionState: adaptiveResult.assertionState,
+          assertionContract,
+          stepExecutionFailed: adaptiveResult.stepExecutionFailed,
+          stopReason: adaptiveResult.stopReason,
+          executedSteps: adaptiveResult.executedSteps,
+        });
+
+        // 2. Failure classifier: only runs on failure — deterministic, no LLM.
+        const failureClassification: FailureClassification | undefined = pass
+          ? undefined
+          : classifyFailure({
+              stopReason: adaptiveResult.stopReason,
+              assertionState: evaluationResult.finalAssertionState,
+              executedSteps: adaptiveResult.executedSteps,
+              stepExecutionFailed: adaptiveResult.stepExecutionFailed,
+              retryAttempted: adaptiveResult.retryAttempted,
+              uiNotes: adaptiveResult.uiNotes,
+              pass,
+            });
+
+        // 3. Confidence scorer: always runs — deterministic, no LLM.
+        const scenarioConfidence: ScenarioConfidence = scoreScenarioConfidence({
+          assertionState: evaluationResult.finalAssertionState,
+          assertionContract,
+          stopReason: adaptiveResult.stopReason,
+          executedSteps: adaptiveResult.executedSteps,
+          stepExecutionFailed: adaptiveResult.stepExecutionFailed,
+          retryAttempted: adaptiveResult.retryAttempted,
+          partialScore: evaluationResult.partialScore,
+          uiNotes: adaptiveResult.uiNotes,
+        });
+
+        // ── Phase 3: Reflection Agent ────────────────────────────────────────
+        // Runs post-execution, always in a try/catch. A failure here MUST
+        // never prevent ScenarioResult assembly or break the execution run.
+        let reflection: ReflectionReport | undefined;
+        try {
+          reflection = await runReflectionAgent({
+            scenarioGoal: workflowDescription,
+            executedSteps: adaptiveResult.executedSteps,
+            stopReason: adaptiveResult.stopReason,
+            uiNotes: adaptiveResult.uiNotes,
+            pass,
+            evaluationResult,
+            failureClassification,
+            scenarioConfidence,
+            model: config.model,
+            token: config.githubToken,
+            llmEndpoint: config.llmEndpoint,
+            llmProvider: config.llmProvider,
+          });
+        } catch {
+          // Defensive outer catch — runReflectionAgent should never throw,
+          // but this guard ensures execution is unconditionally resilient.
+          reflection = undefined;
+        }
+
         const scenarioResult: ScenarioResult = {
           scenarioName: workflowDescription,
           expected,
@@ -381,12 +456,18 @@ export async function runWorkflow(config: WorkflowConfig): Promise<AgentState> {
               ? adaptiveResult.screenshots.slice()
               : undefined,
           assertionSummary: {
-            fulfilled: adaptiveResult.assertionState.fulfilled.slice(),
-            failed: adaptiveResult.assertionState.failed.slice(),
-            pending: adaptiveResult.assertionState.pending.slice(),
+            fulfilled: evaluationResult.finalAssertionState.fulfilled.slice(),
+            failed: evaluationResult.finalAssertionState.failed.slice(),
+            pending: evaluationResult.finalAssertionState.pending.slice(),
           },
           stopReason: adaptiveResult.stopReason,
-          partialScore: adaptiveResult.partialScore,
+          partialScore: evaluationResult.partialScore,
+          // ── Phase 2 enrichment fields ─────────────────────────────────────
+          evaluation: evaluationResult,
+          failureClassification,
+          confidence: scenarioConfidence,
+          // ── Phase 3 enrichment ─────────────────────────────────────────────
+          reflection,
         };
 
         if (metricsForScenario) {
@@ -810,6 +891,7 @@ type AdaptiveActionType =
   | "SCROLL"
   | "WAIT"
   | "ASSERT"
+  | "ASSERT_TEXT"
   | "STOP";
 
 type AdaptiveNextAction = {
@@ -888,6 +970,14 @@ function hashDomSnapshotStatic(snapshot: string): string {
     hash = (hash * 31 + snapshot.charCodeAt(i)) >>> 0;
   }
   return `${snapshot.length}:${hash}`;
+}
+
+function getAssertionType(assertion: string): string {
+  if (assertion.startsWith("elementVisible")) return "element";
+  if (assertion.startsWith("textPresent")) return "text";
+  if (assertion.startsWith("textAbsent")) return "text";
+  if (assertion.startsWith("apiCalled")) return "api";
+  return "unknown";
 }
 
 async function adaptiveExecutionLoop(
@@ -1076,6 +1166,28 @@ async function adaptiveExecutionLoop(
       }
     }
 
+    // Generic cycle suppression: track the last 10 actions and penalise
+    // any single action+target combination that has been attempted >= 3 times.
+    // This is purely structural — no workflow knowledge required.
+    if (nextAction && nextAction.type !== "STOP" && nextAction.type !== "WAIT") {
+      const actionFingerprint =
+        nextAction.type +
+        (nextAction.elementIndex !== undefined ? `:el[${nextAction.elementIndex}]` : "") +
+        (nextAction.selector ? `:${nextAction.selector}` : "") +
+        (nextAction.url ? `:${nextAction.url}` : "") +
+        (nextAction.value ? `:${nextAction.value}` : "");
+
+      const recentFingerprints = executedSteps.slice(-10);
+      const repeatCount = recentFingerprints.filter((s) => s === actionFingerprint).length;
+
+      if (repeatCount >= 3) {
+        // This exact action has been attempted 3+ times recently without progress.
+        // Force a short wait to break the cycle and give the LLM a fresh signal next step.
+        uiNotes += `Cycle suppressed: "${actionFingerprint}" repeated ${repeatCount} times. `;
+        nextAction = { type: "WAIT", milliseconds: 1500 };
+      }
+    }
+
     // STOP-gating: reject STOP when there are still pending assertions.
     if (!nextAction || nextAction.type === "STOP") {
       const pendingCount: number = assertionState.pending.length;
@@ -1129,6 +1241,24 @@ async function adaptiveExecutionLoop(
     // Limit ASSERT spam: after step 5, convert ASSERT to a short WAIT.
     if (nextAction && nextAction.type === "ASSERT" && stepCount > 5) {
       nextAction = { type: "WAIT", milliseconds: 1000 };
+    }
+
+    // Dispatch ASSERT_TEXT for pending textPresent/textAbsent assertions.
+    // When the LLM proposes a non-text action and text assertions are still pending,
+    // intercept and inject an ASSERT_TEXT to validate them against the live DOM.
+    if (nextAction && nextAction.type !== "ASSERT_TEXT") {
+      const pendingTextAssertion = assertionState.pending.find(
+        (a) => a.startsWith("textPresent:") || a.startsWith("textAbsent:")
+      );
+      if (pendingTextAssertion) {
+        const isAbsent = pendingTextAssertion.startsWith("textAbsent:");
+        const textValue = pendingTextAssertion.split(":").slice(1).join(":");
+        nextAction = {
+          type: "ASSERT_TEXT" as AdaptiveActionType,
+          value: textValue,
+          assertionType: isAbsent ? "textAbsent" : "textPresent",
+        };
+      }
     }
 
     // Dispatch the action using the new dispatcher (supports all 10 action types).
@@ -1189,6 +1319,67 @@ async function adaptiveExecutionLoop(
           };
         }
         console.log("ASSERT FAILED — moved to assertionState.failed:", assertionState.failed);
+      }
+
+      if (dispatcherAction.type === "ASSERT" && dispatchResult.success) {
+        if (assertionState.pending.length > 0) {
+          let matchedIndex = -1;
+          const selector = dispatchResult.selectorUsed || "";
+          matchedIndex = assertionState.pending.findIndex((a) => {
+            if (!selector) return false;
+            const type = getAssertionType(a);
+            // ELEMENT assertions — must match by selector characteristics.
+            if (type === "element") {
+              return selector.includes("data-test") || selector.includes("button") || selector.includes("link");
+            }
+            // TEXT assertions — only match when selector has text relevance.
+            if (type === "text") {
+              return selector.includes("text") || selector.includes("label");
+            }
+            // API assertions — never resolvable via UI ASSERT.
+            if (type === "api") {
+              return false;
+            }
+            return false;
+          });
+
+          if (matchedIndex !== -1) {
+            const matched = assertionState.pending[matchedIndex];
+            assertionState = {
+              ...assertionState,
+              pending: assertionState.pending.filter((_, i) => i !== matchedIndex),
+              fulfilled: [...assertionState.fulfilled, matched],
+            };
+            console.log("ASSERT SUCCESS — matched:", matched);
+          }
+        }
+      }
+
+      // Handle ASSERT_TEXT result — resolve matching text assertion.
+      if (dispatcherAction.type === "ASSERT_TEXT") {
+        const textValue = dispatcherAction.value ?? "";
+        const isAbsent = dispatcherAction.assertionType === "textAbsent";
+        // textPresent: success=true → fulfill. textAbsent: success=false → fulfill.
+        const shouldFulfill = isAbsent ? !dispatchResult.success : dispatchResult.success;
+        const assertionKey = isAbsent ? `textAbsent:${textValue}` : `textPresent:${textValue}`;
+        const matchIdx = assertionState.pending.findIndex((a) => a === assertionKey);
+        if (matchIdx !== -1) {
+          if (shouldFulfill) {
+            assertionState = {
+              ...assertionState,
+              pending: assertionState.pending.filter((_, i) => i !== matchIdx),
+              fulfilled: [...assertionState.fulfilled, assertionKey],
+            };
+            console.log("ASSERT_TEXT fulfilled:", assertionKey);
+          } else {
+            assertionState = {
+              ...assertionState,
+              pending: assertionState.pending.filter((_, i) => i !== matchIdx),
+              failed: [...assertionState.failed, assertionKey],
+            };
+            console.log("ASSERT_TEXT failed:", assertionKey);
+          }
+        }
       }
 
       if (!dispatchResult.success) {

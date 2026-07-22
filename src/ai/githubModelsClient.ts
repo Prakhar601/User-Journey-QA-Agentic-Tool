@@ -1,4 +1,11 @@
-import { getModelProvider } from "./modelProvider";
+import { logInference } from "./inferenceLogger";
+import type { GenerateResponseOptions } from "./modelProvider";
+import {
+  buildProviderConfig,
+  resolveEndpoint,
+  resolveProviderKind,
+} from "./providerConfig";
+import { createModelProvider } from "./providerFactory";
 
 interface LlmClientConfig {
   provider?: string;
@@ -8,9 +15,8 @@ interface LlmClientConfig {
 
 /**
  * Unified model call entry point.
- * Uses MODEL_PROVIDER to select backend:
- *   - MODEL_PROVIDER=github → GitHub Models API (GITHUB_PAT, GITHUB_MODEL)
- *   - MODEL_PROVIDER=local (or LLM_PROVIDER=ollama) → Local LLM (LLM_ENDPOINT, LLM_MODEL)
+ * Provider selection is env-driven via MODEL_PROVIDER / MODEL_NAME.
+ * Backwards compatible with LLM_PROVIDER, LLM_MODEL, GITHUB_MODEL.
  */
 export async function callModel(
   model: string,
@@ -18,60 +24,42 @@ export async function callModel(
   token: string,
   llmConfig?: LlmClientConfig
 ): Promise<string> {
-  const provider = getModelProvider();
+  const providerKind = resolveProviderKind(llmConfig?.provider);
+  const config = buildProviderConfig({
+    provider: providerKind,
+    model: llmConfig?.model ?? model,
+    endpoint: llmConfig?.endpoint,
+    token: token || undefined,
+  });
+
+  const provider = createModelProvider(providerKind);
   const messages = [{ role: "user" as const, content: prompt }];
-  const options = {
-    model: llmConfig?.model ?? process.env.LLM_MODEL ?? model,
-    token,
-    endpoint: llmConfig?.endpoint ?? process.env.LLM_ENDPOINT,
-    provider: llmConfig?.provider ?? process.env.LLM_PROVIDER,
+  const options: GenerateResponseOptions = {
+    model: config.model,
+    token: config.apiKey || token,
+    endpoint: config.endpoint,
+    provider: providerKind,
+    timeoutMs: config.timeoutMs,
   };
-  return provider.generateResponse(messages, options);
+
+  const result = await provider.generateResponse(messages, options);
+
+  logInference(
+    {
+      provider: providerKind,
+      model: config.model,
+      endpoint: resolveEndpoint(providerKind, config.endpoint),
+    },
+    result
+  );
+
+  return result.content;
 }
 
 export async function listModels(token: string): Promise<string[]> {
-  const url: string = "https://models.github.ai/catalog/models";
-
-  const response: Response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-  });
-
-  if (!response.ok) {
-    const errorText: string = await response.text();
-    throw new Error(
-      `GitHub Models catalog failed: ${response.status} ${response.statusText}\n${errorText}`
-    );
+  const provider = createModelProvider("github");
+  if (provider.listModels) {
+    return provider.listModels({ token });
   }
-
-  let data: unknown;
-  try {
-    data = (await response.json()) as unknown;
-  } catch {
-    throw new Error("GitHub Models catalog response is not valid JSON.");
-  }
-
-  const models: unknown = Array.isArray(data)
-    ? data
-    : (data as { models?: unknown })?.models ?? [];
-
-  if (!Array.isArray(models)) {
-    return [];
-  }
-
-  const ids: string[] = [];
-  for (const m of models) {
-    const id: unknown =
-      typeof m === "object" && m !== null && "id" in m
-        ? (m as { id?: unknown }).id
-        : undefined;
-    if (typeof id === "string" && id.length > 0) {
-      ids.push(id);
-    }
-  }
-  return ids;
+  return [];
 }

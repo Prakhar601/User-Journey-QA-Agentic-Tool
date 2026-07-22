@@ -10,12 +10,38 @@ import type {
 } from "./types";
 import { ensureEnterpriseOutputStructure } from "./outputManager";
 import { generateNetworkSummary } from "./networkSummary";
+// ── Phase 4 imports ──────────────────────────────────────────────────────────
+import {
+  buildReflectionReportSheet,
+  buildExecutionTimelineSheet,
+  buildRunSummarySheet,
+  injectIntelligenceColumns,
+  // Phase 5
+  buildProviderBenchmarkSheet,
+  type BenchmarkResultRow,
+} from "./reflectionReportSheet";
 
 export interface ReportingContext {
   executionTool: ExecutionTool;
   executionEnvironment: string;
   outputDirPath?: string;
   executionMetadata?: ExecutionMetadata;
+  // ── Phase 4 additions (optional, backward-compatible) ──────────────────
+  /** Active LLM provider identifier, e.g. "github" | "amd" | "ollama". */
+  provider?: string;
+  /** Active model name, e.g. "gpt-4o" or "meta-llama-3-8b-instruct". */
+  model?: string;
+  /** ISO timestamp of the run start. Defaults to current time if absent. */
+  runTimestamp?: string;
+  /** Project version string from package.json. */
+  projectVersion?: string;
+  // ── Phase 5 additions ──────────────────────────────────────────────────
+  /**
+   * Optional provider benchmark results.
+   * When supplied, a "Provider Benchmark" sheet is appended to the workbook.
+   * Absent (undefined or empty array) silently skips the sheet.
+   */
+  benchmarkResults?: BenchmarkResultRow[];
 }
 
 interface ScenarioNetworkMetrics {
@@ -818,8 +844,23 @@ export async function writeTestResultsExcel(
 
   const workbook: XLSX.WorkBook = XLSX.utils.book_new();
 
-  // Sheet 1: Test Results
+  // Sheet 1: Test Results (existing columns, then Phase 4 intelligence columns injected)
   buildTestResultsSheet(workbook, scenarioResults, reports);
+  try {
+    // The existing sheet has 4 columns (0–3); inject Phase 4 columns starting at column 4.
+    const testResultsWs = workbook.Sheets["Test Results"];
+    if (testResultsWs) {
+      injectIntelligenceColumns(
+        testResultsWs,
+        scenarioResults,
+        4, // first free column after Scenario Name, Expected, Actual, Result
+        context.provider ?? process.env["MODEL_PROVIDER"] ?? process.env["LLM_PROVIDER"] ?? "unknown",
+        context.model ?? context.executionMetadata?.modelUsed ?? "unknown"
+      );
+    }
+  } catch {
+    // Intelligence column injection is additive — never blocks report generation
+  }
 
   // Sheet 2: Executive Summary
   buildExecutiveSummarySheet(workbook, scenarioResults);
@@ -830,6 +871,42 @@ export async function writeTestResultsExcel(
 
   // Sheet 4: Summary
   await buildSummarySheet(workbook, scenarioResults, internetSpeedMbps);
+
+  // ── Phase 4: AI-intelligence sheets ───────────────────────────────────────────
+  const p4Provider   = context.provider      ?? process.env["MODEL_PROVIDER"] ?? process.env["LLM_PROVIDER"] ?? "unknown";
+  const p4Model      = context.model         ?? context.executionMetadata?.modelUsed ?? "unknown";
+  const p4Timestamp  = context.runTimestamp  ?? context.executionMetadata?.executionDate ?? new Date().toISOString();
+  const p4Version    = context.projectVersion ?? "0.1.0";
+
+  // Sheet 5: AI Reflection Report
+  try {
+    buildReflectionReportSheet(workbook, scenarioResults, p4Provider, p4Model);
+  } catch {
+    // Never block workbook write
+  }
+
+  // Sheet 6: Execution Timeline
+  try {
+    buildExecutionTimelineSheet(workbook, scenarioResults);
+  } catch {
+    // Never block workbook write
+  }
+
+  // Sheet 7: Run Summary
+  try {
+    buildRunSummarySheet(workbook, scenarioResults, p4Provider, p4Model, p4Timestamp, p4Version);
+  } catch {
+    // Never block workbook write
+  }
+
+  // Sheet 8 (Phase 5): Provider Benchmark
+  try {
+    if (context.benchmarkResults && context.benchmarkResults.length > 0) {
+      buildProviderBenchmarkSheet(workbook, context.benchmarkResults);
+    }
+  } catch {
+    // Additive — never blocks workbook write
+  }
 
   const { testResultsXlsxPath } = await ensureEnterpriseOutputStructure({
     outputDirPath: context.outputDirPath,
@@ -848,8 +925,22 @@ export async function writeRegressionReportExcel(
 
   const workbook: XLSX.WorkBook = XLSX.utils.book_new();
 
-  // Sheet 1: Test Results
+  // Sheet 1: Test Results (existing columns, then Phase 4 intelligence columns injected)
   buildTestResultsSheet(workbook, scenarioResults, reports);
+  try {
+    const testResultsWs = workbook.Sheets["Test Results"];
+    if (testResultsWs) {
+      injectIntelligenceColumns(
+        testResultsWs,
+        scenarioResults,
+        4,
+        context.provider ?? process.env["MODEL_PROVIDER"] ?? process.env["LLM_PROVIDER"] ?? "unknown",
+        context.model ?? context.executionMetadata?.modelUsed ?? "unknown"
+      );
+    }
+  } catch {
+    // Additive — never blocks report generation
+  }
 
   // Sheet 2: Executive Summary
   buildExecutiveSummarySheet(workbook, scenarioResults);
@@ -860,6 +951,39 @@ export async function writeRegressionReportExcel(
 
   // Sheet 4: Summary
   await buildSummarySheet(workbook, scenarioResults, internetSpeedMbps);
+
+  // ── Phase 4: AI-intelligence sheets ───────────────────────────────────────────
+  const p4Provider   = context.provider      ?? process.env["MODEL_PROVIDER"] ?? process.env["LLM_PROVIDER"] ?? "unknown";
+  const p4Model      = context.model         ?? context.executionMetadata?.modelUsed ?? "unknown";
+  const p4Timestamp  = context.runTimestamp  ?? context.executionMetadata?.executionDate ?? new Date().toISOString();
+  const p4Version    = context.projectVersion ?? "0.1.0";
+
+  try {
+    buildReflectionReportSheet(workbook, scenarioResults, p4Provider, p4Model);
+  } catch {
+    // Never block workbook write
+  }
+
+  try {
+    buildExecutionTimelineSheet(workbook, scenarioResults);
+  } catch {
+    // Never block workbook write
+  }
+
+  try {
+    buildRunSummarySheet(workbook, scenarioResults, p4Provider, p4Model, p4Timestamp, p4Version);
+  } catch {
+    // Never block workbook write
+  }
+
+  // Sheet 8 (Phase 5): Provider Benchmark
+  try {
+    if (context.benchmarkResults && context.benchmarkResults.length > 0) {
+      buildProviderBenchmarkSheet(workbook, context.benchmarkResults);
+    }
+  } catch {
+    // Additive — never blocks workbook write
+  }
 
   const { regressionReportXlsxPath } = await ensureEnterpriseOutputStructure({
     outputDirPath: context.outputDirPath,

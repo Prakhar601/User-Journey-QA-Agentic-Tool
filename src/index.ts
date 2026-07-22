@@ -12,15 +12,25 @@ import type { ExecutionTool, ExecutionMetadata } from "./reporting/types";
 import { generateRegressionSkeleton } from "./reporting/regressionSkeletonGenerator";
 import { ensureEnterpriseOutputStructure } from "./reporting/outputManager";
 import { loadConfig } from "./config/loadConfig";
+import { loadEnvFile } from "./ai/loadEnv";
 // import { listModels } from "./ai/githubModelsClient"; // ❌ Disabled for remote mode
 import { callModel } from "./ai/githubModelsClient";
 import {
   generateScenariosFromPRD,
   type ModelClient,
 } from "./ai/scenarioGenerator";
+import { buildProviderConfig, resolveProviderKind } from "./ai/providerConfig";
+import { runBenchmark } from "./benchmark/runBenchmark";
 
 async function main(): Promise<void> {
   try {
+    loadEnvFile();
+
+    if (process.env.BENCHMARK === "true") {
+      await runBenchmark();
+      return;
+    }
+
     const engineConfig = loadConfig();
 
     const url: string = readlineSync.question("URL: ");
@@ -77,14 +87,12 @@ async function main(): Promise<void> {
 
     // ===============================
     // CONFIG-DRIVEN LLM MODE
-    // MODEL_PROVIDER=github | local (default: local)
+    // MODEL_PROVIDER=github | ollama | amd | local
+    // MODEL_NAME overrides provider-specific model env vars
     // ===============================
 
-    const modelProvider: string =
-      (process.env.MODEL_PROVIDER ?? process.env.LLM_PROVIDER ?? "local")
-        .trim()
-        .toLowerCase();
-    const isGitHubProvider: boolean = modelProvider === "github";
+    const providerKind = resolveProviderKind();
+    const llmRuntime = buildProviderConfig();
 
     let defaultLlmProvider: string;
     let defaultLlmEndpoint: string;
@@ -92,32 +100,50 @@ async function main(): Promise<void> {
     let githubToken: string;
     let model: string;
 
-    if (isGitHubProvider) {
+    if (providerKind === "github") {
       defaultLlmProvider = "github";
-      defaultLlmEndpoint = ""; // Not used for GitHub Models
-      defaultLlmModel = ""; // Resolved via GITHUB_MODEL
-      const pat = (process.env.GITHUB_PAT ?? "").trim();
-      if (!pat) {
+      defaultLlmEndpoint = "";
+      defaultLlmModel = llmRuntime.model;
+      if (!llmRuntime.apiKey) {
         throw new Error(
           "GitHub PAT is not configured. Set GITHUB_PAT when using MODEL_PROVIDER=github."
         );
       }
-      githubToken = pat;
-      model =
-        (process.env.GITHUB_MODEL ?? "openai/gpt-4.1-mini").trim() ||
-        "openai/gpt-4.1-mini";
-    } else {
-      defaultLlmProvider = (process.env.LLM_PROVIDER ?? "ollama").trim() || "ollama";
-      defaultLlmEndpoint = (process.env.LLM_ENDPOINT ?? "").trim();
-      if (!defaultLlmEndpoint) {
+      githubToken = llmRuntime.apiKey;
+      model = llmRuntime.model;
+    } else if (providerKind === "amd") {
+      defaultLlmProvider = "amd";
+      defaultLlmEndpoint = llmRuntime.endpoint;
+      defaultLlmModel = llmRuntime.model;
+      if (!llmRuntime.endpoint) {
         throw new Error(
-          "LLM endpoint is not configured. Set LLM_ENDPOINT when using MODEL_PROVIDER=local."
+          "AMD endpoint is not configured. Set AMD_BASE_URL when using MODEL_PROVIDER=amd."
         );
       }
-      defaultLlmModel = (process.env.LLM_MODEL ?? "").trim();
+      if (!llmRuntime.apiKey) {
+        throw new Error(
+          "AMD API key is not configured. Set AMD_API_KEY when using MODEL_PROVIDER=amd."
+        );
+      }
+      if (!llmRuntime.model) {
+        throw new Error(
+          "AMD model is not configured. Set MODEL_NAME or AMD_MODEL when using MODEL_PROVIDER=amd."
+        );
+      }
+      githubToken = llmRuntime.apiKey;
+      model = llmRuntime.model;
+    } else {
+      defaultLlmProvider = (process.env.LLM_PROVIDER ?? "ollama").trim() || "ollama";
+      defaultLlmEndpoint = llmRuntime.endpoint;
+      if (!defaultLlmEndpoint) {
+        throw new Error(
+          "LLM endpoint is not configured. Set LLM_ENDPOINT when using MODEL_PROVIDER=ollama."
+        );
+      }
+      defaultLlmModel = llmRuntime.model;
       if (!defaultLlmModel) {
         throw new Error(
-          "LLM model is not configured. Set LLM_MODEL when using MODEL_PROVIDER=local."
+          "LLM model is not configured. Set MODEL_NAME or LLM_MODEL when using MODEL_PROVIDER=ollama."
         );
       }
       githubToken = "";
@@ -272,6 +298,11 @@ async function main(): Promise<void> {
       executionEnvironment,
       outputDirPath: executionConfig.outputDirPath,
       executionMetadata,
+      // ── Phase 4: AI intelligence reporting metadata ────────────────────
+      provider: config.llmProvider ?? process.env["MODEL_PROVIDER"] ?? process.env["LLM_PROVIDER"] ?? "unknown",
+      model: config.model,
+      runTimestamp: executionDate,
+      projectVersion: "0.1.0",
     });
     console.log("Excel test results saved to the configured output folder.");
 
@@ -303,6 +334,11 @@ async function main(): Promise<void> {
         executionEnvironment,
         outputDirPath: executionConfig.outputDirPath,
         executionMetadata,
+        // ── Phase 4: AI intelligence reporting metadata ─────────────────
+        provider: config.llmProvider ?? process.env["MODEL_PROVIDER"] ?? process.env["LLM_PROVIDER"] ?? "unknown",
+        model: config.model,
+        runTimestamp: executionDate,
+        projectVersion: "0.1.0",
       });
       console.log("Regression report saved to the configured output folder.");
 

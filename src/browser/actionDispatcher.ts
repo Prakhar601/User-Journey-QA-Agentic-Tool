@@ -18,6 +18,8 @@ export interface AutomationController {
   hover?(selector: string): Promise<void>;
   navigate?(url: string): Promise<void>;
   isVisible?(selector: string): Promise<boolean>;
+  getPageText?(): Promise<string>;
+  dismissOverlay?(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -34,6 +36,7 @@ export type AdaptiveActionType =
   | "NAVIGATE"
   | "WAIT"
   | "ASSERT"
+  | "ASSERT_TEXT"
   | "STOP";
 
 export interface AdaptiveNextAction {
@@ -224,6 +227,39 @@ async function handleClick(
     return { success: true, selectorUsed: selector };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+
+    // Overlay/intercept recovery: if another element is blocking pointer events,
+    // attempt to dismiss it (Escape key or body click) then retry once.
+    const isInterceptError =
+      msg.includes("intercepts pointer events") ||
+      msg.includes("element is not stable") ||
+      msg.includes("element is outside of the viewport") ||
+      msg.includes("blocked by");
+
+    if (isInterceptError) {
+      console.log("OVERLAY DETECTED — attempting dismiss and retry:", msg);
+      try {
+        if (browser.dismissOverlay) {
+          await browser.dismissOverlay();
+        }
+        // Short pause to allow overlay animation to complete.
+        if (browser.waitForTimeout) {
+          await browser.waitForTimeout(500);
+        }
+        await browser.click(selector);
+        console.log("SUCCESS:", true, "(after overlay dismiss)");
+        return { success: true, selectorUsed: selector };
+      } catch (retryErr) {
+        const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        console.log("SUCCESS:", false, "(retry after overlay dismiss also failed)");
+        return {
+          success: false,
+          selectorUsed: selector,
+          errorMessage: `CLICK failed after overlay dismiss — "${selector}": ${retryMsg}`,
+        };
+      }
+    }
+
     console.log("SUCCESS:", false);
     return {
       success: false,
@@ -552,6 +588,44 @@ async function handleAssert(
   }
 }
 
+async function handleAssertText(
+  browser: AutomationController,
+  value: string
+): Promise<DispatchResult> {
+  if (!browser.getPageText) {
+    return {
+      success: false,
+      errorMessage: "ASSERT_TEXT: getPageText() not implemented by this browser controller.",
+    };
+  }
+
+  if (!value || value.trim().length === 0) {
+    return {
+      success: false,
+      errorMessage: "ASSERT_TEXT: no text value provided.",
+    };
+  }
+
+  try {
+    const pageText = await browser.getPageText();
+    const found = pageText.includes(value);
+    if (found) {
+      return { success: true, selectorUsed: `text:${value}` };
+    }
+    return {
+      success: false,
+      selectorUsed: `text:${value}`,
+      errorMessage: `ASSERT_TEXT: text not found in page — "${value}"`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      errorMessage: `ASSERT_TEXT failed: ${msg}`,
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -719,6 +793,10 @@ export async function dispatchAction(
           ? findElement(elements, action.elementIndex)
           : undefined;
       return handleAssert(browser, element, action.assertionType);
+    }
+
+    case "ASSERT_TEXT": {
+      return handleAssertText(browser, action.value ?? "");
     }
 
     default: {

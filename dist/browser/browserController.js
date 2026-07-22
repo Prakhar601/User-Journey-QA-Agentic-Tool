@@ -88,6 +88,10 @@ class BrowserController {
         const page = (0, browserSession_1.getPage)();
         return await page.content();
     }
+    async getPageText() {
+        const page = (0, browserSession_1.getPage)();
+        return await page.evaluate(() => document.body.innerText ?? "");
+    }
     async getNetworkLogs() {
         return (0, browserSession_1.getNetworkLogs)();
     }
@@ -150,6 +154,26 @@ class BrowserController {
         }
         catch {
             return false;
+        }
+    }
+    /**
+     * Attempts to dismiss any overlay, modal, or menu blocking pointer events.
+     * Presses Escape first (closes most menus/modals), then clicks body as fallback.
+     * Never throws — failures are silently ignored so the caller can retry the click.
+     */
+    async dismissOverlay() {
+        const page = (0, browserSession_1.getPage)();
+        try {
+            await page.keyboard.press("Escape");
+        }
+        catch {
+            // Ignore — Escape may not be handled by the page.
+        }
+        try {
+            await page.click("body", { timeout: 1000 });
+        }
+        catch {
+            // Ignore — body click is best-effort only.
         }
     }
     async handleTwoFactorIfPresent(page) {
