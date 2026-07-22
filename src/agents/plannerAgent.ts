@@ -82,10 +82,6 @@ Return ONLY the JSON object.
     model,
   });
 
-  console.log("=== RAW MODEL RESPONSE START ===");
-  console.log(rawResponse);
-  console.log("=== RAW MODEL RESPONSE END ===");
-
   const parsedOrFallback: unknown = safeParsePlannerResponse(rawResponse);
 
   if (isPlannerFallback(parsedOrFallback)) {

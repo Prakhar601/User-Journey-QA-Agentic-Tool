@@ -199,8 +199,6 @@ async function handleClick(
 
   const selector = await resolveLocator(element.selectorRank, probe);
   if (!selector) {
-    console.log("SELECTOR:", "(none resolved)");
-    console.log("SUCCESS:", false);
     return {
       success: false,
       errorMessage: `No selector could be resolved for element index ${element.elementIndex} (${element.tag}).`,
@@ -210,8 +208,6 @@ async function handleClick(
   if (browser.isVisible) {
     const visible = await browser.isVisible(selector);
     if (!visible) {
-      console.log("SELECTOR:", selector);
-      console.log("SUCCESS:", false);
       return {
         success: false,
         selectorUsed: selector,
@@ -221,9 +217,7 @@ async function handleClick(
   }
 
   try {
-    console.log("SELECTOR:", selector);
     await browser.click(selector);
-    console.log("SUCCESS:", true);
     return { success: true, selectorUsed: selector };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -247,11 +241,9 @@ async function handleClick(
           await browser.waitForTimeout(500);
         }
         await browser.click(selector);
-        console.log("SUCCESS:", true, "(after overlay dismiss)");
         return { success: true, selectorUsed: selector };
       } catch (retryErr) {
         const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-        console.log("SUCCESS:", false, "(retry after overlay dismiss also failed)");
         return {
           success: false,
           selectorUsed: selector,
@@ -259,8 +251,6 @@ async function handleClick(
         };
       }
     }
-
-    console.log("SUCCESS:", false);
     return {
       success: false,
       selectorUsed: selector,

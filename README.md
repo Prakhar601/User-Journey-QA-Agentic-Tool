@@ -1,456 +1,275 @@
-# AI Regression Agent
+# <div align="center">Autonomous User-Journey QA Agent</div>
 
-An AI-powered regression testing agent that uses Large Language Models (LLMs) to plan, execute, and evaluate browser-based workflows automatically. It supports both **Playwright** and **Selenium** for browser automation, and both **local LLMs** (Ollama-compatible) and **GitHub Models** as AI backends.
+<p align="center">
+  <a href="#license"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white" alt="TypeScript">
+  <img src="https://img.shields.io/badge/Playwright-2EAD33?logo=playwright&logoColor=white" alt="Playwright">
+  <img src="https://img.shields.io/badge/AMD%20AI-DevMaster%20Hackathon-E0053D?style=flat&logo=amd&logoColor=white" alt="AMD AI">
+  <img src="https://img.shields.io/badge/Powered%20by-Fireworks%20AI-orange" alt="Fireworks AI">
+  <img src="https://img.shields.io/badge/Status-Release%20Candidate-brightgreen" alt="Status">
+</p>
 
----
-
-## Table of Contents
-
-1. [Architecture Overview](#architecture-overview)
-2. [Prerequisites](#prerequisites)
-3. [Project Structure](#project-structure)
-4. [Installation](#installation)
-5. [Configuration](#configuration)
-6. [Environment Variables Reference](#environment-variables-reference)
-7. [Running the Agent](#running-the-agent)
-8. [Available Scripts](#available-scripts)
-9. [Dependencies](#dependencies)
-10. [Troubleshooting](#troubleshooting)
+> **Eliminate brittle UI scripts. A fully autonomous QA agent that plans, executes, reflects, and reports on web testing — powered by AMD AI.**
 
 ---
 
-## Architecture Overview
+## 🎥 Demo Video
 
-```
-┌─────────────────────────────────────────────────────┐
-│                  Entry Points                        │
-│  src/index.ts (interactive CLI)                      │
-│  src/autoLaunch.ts (env-var driven, CI-friendly)     │
-└───────────────────┬─────────────────────────────────┘
-                    │
-          ┌─────────▼──────────┐
-          │  Orchestrator       │
-          │  src/core/          │
-          └──┬──────────┬──────┘
-             │          │
-   ┌──────────▼──┐  ┌───▼──────────────┐
-   │ AI Agents   │  │ Browser Control  │
-   │ src/agents/ │  │ src/browser/     │
-   │  - Planner  │  │  - Playwright    │
-   │  - Generator│  │  - Selenium      │
-   │  - Evaluator│  └──────────────────┘
-   └──────┬──────┘
-          │
-   ┌──────▼──────────────┐    ┌─────────────────────┐
-   │ LLM Backends        │    │ Python Browser Agent │
-   │ src/ai/             │    │ python-agent/        │
-   │  - Local (Ollama)   │    │  browser_agent.py    │
-   │  - GitHub Models    │    │  (browser-use lib)   │
-   └─────────────────────┘    └─────────────────────┘
-          │
-   ┌──────▼──────────────┐
-   │ Reporting           │
-   │ src/reporting/      │
-   │  - Excel (.xlsx)    │
-   │  - Network summary  │
-   │  - Regression skels │
-   └─────────────────────┘
-```
+Watch the complete 5-minute demonstration covering all core capabilities:
+
+**[▶ Watch Demo on Google Drive](https://drive.google.com/file/d/1YanieQ-A2P0G1wv03hTpC-qfLOc4NfCc/view?usp=drive_link)**
+
+The demo covers:
+- **Adaptive planning** — Natural language workflow → structured assertion contract
+- **Browser execution** — Live autonomous browser navigation
+- **Reflection** — Post-execution root-cause analysis via AMD AI
+- **Failure classification** — Deterministic UI / Network / LLM failure taxonomy
+- **Confidence scoring** — Heuristic reliability score (0.0–1.0) per scenario
+- **Report generation** — 8-sheet Excel output with timeline and AI reasoning
 
 ---
 
-## Prerequisites
+## 🛑 Problem Statement
 
-| Requirement | Version | Notes |
-|---|---|---|
-| **Node.js** | 18 or later | [nodejs.org](https://nodejs.org/) |
-| **npm** | 9 or later | Bundled with Node.js |
-| **Python** | 3.11 or later | Required for the browser-use agent |
-| **pip** | Latest | Bundled with Python |
-| **Ollama** *(local mode)* | Latest | [ollama.com](https://ollama.com/) – run a local model |
-| **GitHub PAT** *(GitHub mode)* | — | Needs `models:read` scope |
-| **ChromeDriver** *(Selenium only)* | Match Chrome version | [chromedriver.chromium.org](https://chromedriver.chromium.org/) |
-| **Git** | Any | Optional, for version control |
+Traditional QA automation is broken. Engineers write thousands of brittle Selenium or Playwright scripts that fail the moment a developer changes a CSS class, an ID, or a layout structure. When a script fails, it leaves behind a generic "Timeout Exception," forcing QA engineers to spend hours debugging whether the application is actually broken or whether the script just needs updating.
+
+This creates a massive bottleneck in continuous delivery, where the cost of maintaining tests exceeds the value they provide.
 
 ---
 
-## Project Structure
+## ⚡ Why This Project Is Different
 
-```
-ai-model-main/
-├── src/                          # TypeScript source (compiled to dist/)
-│   ├── index.ts                  # Interactive CLI entry point
-│   ├── autoLaunch.ts             # Non-interactive (env-var) entry point
-│   ├── agents/                   # AI agent roles
-│   │   ├── plannerAgent.ts       # Generates test plans from workflow descriptions
-│   │   ├── generatorAgent.ts     # Generates Playwright/Selenium test skeletons
-│   │   └── evaluatorAgent.ts     # Evaluates actual vs expected behaviour
-│   ├── ai/
-│   │   ├── githubModelsClient.ts # Unified callModel() – routes to local or GitHub
-│   │   ├── modelProvider.ts      # LocalLLMProvider / GitHubModelsProvider
-│   │   ├── mcpClient.ts          # Spawns python-agent/browser_agent.py
-│   │   └── scenarioGenerator.ts  # PRD → test scenario expansion
-│   ├── browser/
-│   │   ├── browserController.ts  # Playwright browser controller
-│   │   ├── browserSession.ts     # Playwright session/network log management
-│   │   └── seleniumBrowserController.ts  # Selenium WebDriver controller
-│   ├── config/
-│   │   ├── loadConfig.ts         # Reads config/config.json with defaults
-│   │   └── executionConfig.ts    # ExecutionConfig interface
-│   ├── core/
-│   │   ├── orchestrator.ts       # Main workflow driver
-│   │   ├── retry.ts              # Retry with back-off
-│   │   ├── state.ts              # Agent state management
-│   │   ├── types.ts              # Shared TypeScript interfaces
-│   │   ├── validateBrowserState.ts
-│   │   └── verifyBrowserState.ts
-│   └── reporting/
-│       ├── excelReporter.ts      # Writes TestResults.xlsx and regression reports
-│       ├── networkSummary.ts     # Network log summarisation
-│       ├── outputManager.ts      # Manages output/ folder structure
-│       ├── regressionSkeletonGenerator.ts
-│       └── types.ts
-├── python-agent/
-│   ├── browser_agent.py          # browser-use powered crawl/login agent
-│   └── requirements.txt          # Python dependencies
-├── config/
-│   └── config.json               # Static runtime configuration
-├── dist/                         # Compiled JavaScript (auto-generated)
-├── output/                       # Test reports, screenshots (auto-generated)
-├── dryRunAudit.js                # Standalone dry-run report generator
-├── package.json                  # Node.js project manifest & scripts
-├── tsconfig.json                 # TypeScript compiler options
-├── .env.example                  # Environment variable template
-└── .gitignore
+| Capability | Traditional QA (Playwright/Cypress) | Adaptive Agentic QA |
+| :--- | :--- | :--- |
+| **Execution** | Static, hardcoded steps | Adaptive execution loop — recovers from UI changes |
+| **Element Selection** | Brittle CSS/XPath selectors | LLM-driven DOM interpretation with ranked fallback probing |
+| **Test Planning** | Manual script writing | Planner Agent auto-generates structured assertion contracts |
+| **Failure Analysis** | Manual log diving | Reflection Agent diagnoses root cause via AMD AI |
+| **Failure Classification** | None | Deterministic: UI / Network / LLM / Assertion |
+| **Confidence Scoring** | Binary (Pass/Fail) | Continuous heuristic score (0.0–1.0) |
+| **Regression Fixes** | Manual PR updates | Regression Agent auto-generates Playwright `.spec.ts` files |
+
+---
+
+## 💡 Solution
+
+The **Autonomous User-Journey QA Agent** accepts a natural language prompt (e.g., *"Login and verify the user dashboard loaded"*). It provisions a team of specialized AI agents that work in sequence to:
+
+1. **Plan** — Synthesize a structured JSON assertion contract from the prompt.
+2. **Execute** — Interactively drive the browser, recovering from popups and layout changes.
+3. **Assert** — Validate state visually and via intercepted HTTP traffic.
+4. **Reflect** — Generate root cause analysis and actionable suggestions.
+5. **Score** — Compute a deterministic confidence score for the run.
+6. **Report** — Emit a comprehensive Excel report with full execution timeline.
+
+---
+
+## 🚀 Features
+
+- **Agentic Execution Loop** — Observes the DOM, decides the next action, and evaluates assertions until the workflow succeeds or definitively fails.
+- **Visual & Network Assertions** — Verifies state not just by looking at the screen, but by inspecting intercepted HTTP traffic payloads.
+- **Failure Classifier** — Deterministically categorizes failures into UI, Network, LLM, or Assertion failures — no LLM involved.
+- **Confidence Scorer** — Scores the reliability of the test run, discounting results where the model produced invalid output or the network timed out.
+- **Reflection Engine** — An isolated AMD AI call that analyzes the full execution log and generates actionable suggestions and root-cause summaries.
+- **Regression Code Generation** — Synthesizes a stable, Playwright-ready TypeScript spec file from the successful autonomous run, bridging agentic exploration to CI/CD stability.
+- **Cross-Provider Benchmarking** — Objectively measures AMD, GitHub Models, and Ollama side by side on latency, TTFT, token counts, and JSON validity.
+
+---
+
+## 🏗 Architecture
+
+```mermaid
+graph TD
+    User([User Prompt]) --> Orchestrator[Execution Orchestrator]
+
+    subgraph Agent Swarm
+        Planner[Planner Agent]
+        Generator[Generator Agent]
+        Reflection[Reflection Agent]
+        Regression[Regression Agent]
+    end
+
+    subgraph Deterministic Engines
+        Assertion[Assertion Checker]
+        Confidence[Confidence Scorer]
+        Failure[Failure Classifier]
+    end
+
+    subgraph Environment
+        Browser[Playwright Browser]
+        Network[Network Interceptor]
+        DOM[DOM Extractor]
+    end
+
+    Orchestrator --> Planner
+    Planner --> Orchestrator
+
+    Orchestrator <--> Generator
+    Generator --> Browser
+    Browser --> DOM
+    Browser --> Network
+
+    DOM --> Assertion
+    Network --> Assertion
+    Assertion --> Orchestrator
+
+    Orchestrator --> Failure
+    Orchestrator --> Confidence
+    Orchestrator --> Reflection
+    Orchestrator --> Regression
+
+    Reflection --> Report[Excel / JSON Reports]
+    Regression --> Report
 ```
 
 ---
 
-## Installation
+## 🔄 Agent Workflow
 
-### 1. Clone or navigate to the project
+```mermaid
+sequenceDiagram
+    participant User
+    participant Orchestrator
+    participant Planner
+    participant Generator
+    participant Browser
+    participant PostRun
+
+    User->>Orchestrator: Natural language workflow description
+    Orchestrator->>Planner: Request test plan & assertions
+    Planner-->>Orchestrator: Structured JSON assertion contract
+
+    loop Adaptive Execution Loop
+        Orchestrator->>Browser: Extract clean DOM & network state
+        Browser-->>Orchestrator: HTML snapshot + intercepted traffic
+        Orchestrator->>Generator: Propose next action
+        Generator-->>Orchestrator: Click / Type / Scroll / Wait / Stop
+        Orchestrator->>Browser: Execute action
+        Orchestrator->>Orchestrator: Evaluate assertions
+    end
+
+    Orchestrator->>PostRun: Trigger Reflection, Scoring & Regression
+    PostRun-->>User: Excel report + Playwright regression script
+```
+
+---
+
+## 🧠 Engineering Challenges & Solutions
+
+- **Strict Agent Isolation** — The Reflection Agent never runs inside the execution loop. This enforces clean separation of concerns: execution stays fast, and reflection has access to the full, immutable timeline.
+- **Deterministic Enveloping** — LLMs hallucinate. The Failure Classifier and Confidence Scorer are strictly deterministic algorithms with no LLM calls, wrapping AI output in verifiable heuristics.
+- **Provider Abstraction (Factory Pattern)** — `ProviderFactory` routes all agent calls through a single `ModelProvider` interface. Swapping AMD for GitHub Models or Ollama requires changing exactly one environment variable.
+- **One-Action-at-a-Time Loop** — Instead of generating a full script upfront, the Generator Agent proposes one action at a time. This mirrors human QA testing, allowing natural recovery from unexpected overlays and popups.
+
+---
+
+## 🔴 AMD AI DevMaster Hackathon Integration
+
+**Currently Implemented:**
+- **Inference Provider** — Deep integration with the AMD-provisioned Fireworks AI inference endpoint (`api.fireworks.ai/inference/v1`).
+- **OpenAI-Compatible Bridge** — `AMDModelProvider` enforces strict JSON schema generation against the Fireworks OpenAI-compatible API.
+- **Model** — `accounts/fireworks/models/deepseek-v4-flash-0731` (AMD hackathon provisioned).
+- **Cross-Model Benchmarking** — `npm run benchmark` compares AMD latency and TTFT against GitHub Models and Ollama with identical prompts.
+
+**Future Roadmap (AMD Hardware):**
+- Full ROCm integration for offline, local test execution on Radeon GPUs.
+- Running the Planner and Reflection agents on-device via ONNX/llama.cpp, delegating only the Generator to cloud inference.
+
+---
+
+## 📁 Project Structure
+
+```text
+├── src/
+│   ├── agents/          # Planner, Generator, Reflection, Regression, Evaluator, Confidence, Failure Classifier
+│   ├── ai/              # ProviderFactory, modelProvider (AMD/GitHub/Ollama), providerConfig
+│   ├── browser/         # Playwright controller, actionDispatcher, DOM parser, network analyzer
+│   ├── core/            # Orchestrator, retry logic, state, types
+│   ├── reporting/       # Excel sheet builders (8 sheets), output manager
+│   └── index.ts         # Interactive CLI entry point
+├── benchmark/           # Benchmark runner and results
+├── output/              # Generated Excel reports, timelines, regression scripts
+├── config/              # config.json (headless, timeout, automation tool)
+└── .env.example         # Environment configuration template
+```
+
+---
+
+## ⚙️ Installation
 
 ```bash
-git clone <repository-url>
-cd ai-model-main
-```
+# 1. Clone the repository
+git clone https://github.com/Prakhar601/User-Journey-QA-agentic-tool.git
+cd User-Journey-QA-agentic-tool
 
-### 2. Install Node.js dependencies
-
-```bash
+# 2. Install dependencies
 npm install
-```
-
-### 3. Install Playwright browsers
-
-```bash
 npx playwright install chromium
-# Install additional browsers if needed:
-# npx playwright install firefox
-# npx playwright install webkit
-```
 
-### 4. Set up the Python environment
-
-```bash
-cd python-agent
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
-
-pip install -r requirements.txt
-cd ..
-```
-
-### 5. Create your `.env` file
-
-```bash
-copy .env.example .env   # Windows
-# cp .env.example .env   # macOS / Linux
-```
-
-Edit `.env` with your values (see [Environment Variables Reference](#environment-variables-reference)).
-
-### 6. (Optional) Install and start Ollama for local LLM mode
-
-```bash
-# Download from https://ollama.com and then:
-ollama pull llama3
-ollama serve
+# 3. Configure environment
+cp .env.example .env
+# Edit .env — set AMD_API_KEY and MODEL_PROVIDER=amd
 ```
 
 ---
 
-## Configuration
-
-### `config/config.json`
-
-Controls static runtime behaviour. All fields have defaults and are optional:
-
-```json
-{
-  "automationTool": "playwright",   // "playwright" | "selenium"
-  "browser":        "chromium",     // "chromium" | "chrome" | "firefox"
-  "headless":       true,           // true = no visible browser window
-  "timeoutSeconds": 60,             // per-step timeout
-  "concurrency":    1,              // parallel workflow limit (max 5)
-  "regressionSweep": true,          // run full regression sweep after workflows
-  "outputFolder":   "output",       // relative folder for reports/screenshots
-  "environment":    "local"         // label for reports
-}
-```
-
-### `.env`
-
-Copy `.env.example` to `.env` and fill in the required values for your chosen provider:
+## 🏎 Quick Start
 
 ```bash
-# Local LLM (Ollama)
-MODEL_PROVIDER=local
-LLM_ENDPOINT=http://localhost:11434
-LLM_MODEL=llama3
-
-# OR GitHub Models
-MODEL_PROVIDER=github
-GITHUB_PAT=ghp_xxxxxxxxxxxxxxxxxxxx
-GITHUB_MODEL=openai/gpt-4.1-mini
-```
-
----
-
-## Environment Variables Reference
-
-### LLM Provider Selection
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `MODEL_PROVIDER` | No | `local` | `local` (Ollama) or `github` (GitHub Models) |
-
-### Local LLM Mode (`MODEL_PROVIDER=local`)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `LLM_ENDPOINT` | **Yes** | — | Base URL of your Ollama server, e.g. `http://localhost:11434` |
-| `LLM_MODEL` | **Yes** | — | Model name, e.g. `llama3`, `mistral`, `phi3` |
-| `LLM_PROVIDER` | No | `ollama` | Provider hint, usually `ollama` |
-
-### GitHub Models Mode (`MODEL_PROVIDER=github`)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `GITHUB_PAT` | **Yes** | — | GitHub Personal Access Token with `models:read` scope |
-| `GITHUB_MODEL` | No | `openai/gpt-4.1-mini` | GitHub Models inference model ID |
-
-### Python Agent
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `PYTHON_PATH` | No | `python` | Full path to the Python executable (e.g. `C:\...\python.exe`) |
-
-### Auto-Launch Mode (`npm run launch`)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `URL` | **Yes** | — | Target web application URL |
-| `USERNAME` | **Yes** | — | Login username |
-| `PASSWORD` | **Yes** | — | Login password |
-| `WORKFLOW_DESCRIPTIONS` | **Yes** | — | Comma-separated workflow descriptions or full PRD text |
-| `MODEL` | **Yes** | — | Model name to use (matches `LLM_MODEL` or `GITHUB_MODEL`) |
-| `GITHUB_TOKEN` | No | — | GitHub PAT (only for GitHub Models in auto-launch mode) |
-| `AUTOMATION_TOOL` | No | `playwright` | `playwright` or `selenium` |
-| `TIMEOUT_SECONDS` | No | `60` | Request timeout in seconds |
-
-### Dry-Run Report (`npm run dry-run`)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DRY_RUN_TARGET_URL` | **Yes** | — | Target URL to embed in the audit Excel report |
-| `DRY_RUN_MODEL` | No | `test-model` | Model name label in the report |
-
----
-
-## Running the Agent
-
-### Mode 1 — Interactive CLI (`npm run dev`)
-
-Prompts for all inputs at the terminal. Best for local exploration:
-
-```bash
+# Interactive mode — prompts for URL, credentials, and workflow
 npm run dev
-```
 
-You will be prompted for:
-- **URL** – the web application to test
-- **Username** and **Password** – login credentials
-- **Workflow description or PRD** – comma-separated workflow names, or paste a full PRD (>200 chars triggers automatic scenario expansion)
-- **Timeout**, **automation tool**, **browser**, **headless mode**, and **output folder** – all have defaults from `config/config.json`
-
-### Mode 2 — Auto-Launch / CI mode (`npm run launch`)
-
-Non-interactive; reads everything from environment variables. Suitable for CI/CD pipelines:
-
-```bash
-# Set variables inline (Windows PowerShell)
-$env:MODEL_PROVIDER="local"
-$env:LLM_ENDPOINT="http://localhost:11434"
-$env:LLM_MODEL="llama3"
-$env:URL="https://your-app.com"
-$env:USERNAME="admin"
-$env:PASSWORD="secret"
-$env:WORKFLOW_DESCRIPTIONS="Login and verify dashboard,Add item to cart"
-$env:MODEL="llama3"
-
+# Non-interactive CI mode (reads all config from .env)
 npm run launch
-```
 
-Or with a `.env` file already populated:
-
-```bash
-npm run launch
-```
-
-### Mode 3 — Dry-Run Audit Report (`npm run dry-run`)
-
-Generates a sample Excel report from mock data without executing any browser workflows. Useful to verify the reporting pipeline:
-
-```bash
-$env:DRY_RUN_TARGET_URL="https://your-app.com"
-npm run dry-run
-```
-
-The report is written to `output/<date>/TestResults.xlsx`.
-
-### Mode 4 — Production (pre-compiled, `npm start`)
-
-Run the compiled JavaScript directly (no ts-node overhead):
-
-```bash
-npm run build
-npm start
+# Cross-provider benchmark
+npm run benchmark
 ```
 
 ---
 
-## Available Scripts
+## 📊 Generated Reports
 
-| Script | Command | Description |
-|---|---|---|
-| `npm run dev` | `ts-node src/index.ts` | Interactive CLI mode with prompts |
-| `npm run launch` | `ts-node src/autoLaunch.ts` | Non-interactive, env-var driven mode |
-| `npm run build` | `tsc` | Compile TypeScript → `dist/` |
-| `npm start` | `node dist/index.js` | Run compiled output (production) |
-| `npm run dry-run` | `node dryRunAudit.js` | Generate a mock Excel report |
+Every run writes to `output/` with two Excel files:
 
----
+**`TestResults.xlsx`** (8 sheets):
 
-## Dependencies
-
-### Runtime
-
-| Package | Version | Purpose |
-|---|---|---|
-| `playwright` | ^1.50.0 | Browser automation (Playwright driver) |
-| `@playwright/test` | ^1.50.0 | Test skeleton generation |
-| `selenium-webdriver` | ^4.27.0 | Browser automation (Selenium driver) |
-| `readline-sync` | ^1.4.10 | Synchronous terminal prompts |
-| `dotenv` | ^17.3.1 | Loads `.env` file into `process.env` |
-| `xlsx` | ^0.18.5 | Excel report generation ⚠️ (see note below) |
-| `node-fetch` | ^3.3.2 | HTTP fetch for Node.js |
-| `ts-node` | ^10.9.2 | Run TypeScript files directly |
-| `typescript` | ^5.6.0 | TypeScript compiler |
-
-> ⚠️ **Note on `xlsx`:** The open-source SheetJS community package has a known high-severity prototype-pollution vulnerability with no available fix in the free tier. If this is deployed in a security-sensitive environment, consider replacing it with [`exceljs`](https://github.com/exceljs/exceljs).
-
-### Development
-
-| Package | Purpose |
+| Sheet | Contents |
 |---|---|
-| `@types/node` | TypeScript types for Node.js built-ins |
-| `@types/readline-sync` | TypeScript types for readline-sync |
-| `@types/selenium-webdriver` | TypeScript types for Selenium |
+| Test Results | Confidence %, failure class, reflection summary — all in one row |
+| Executive Summary | High-level pass rate and timing |
+| System Analysis | API call counts and UI render time |
+| Summary | Network waterfall and AI analysis |
+| AI Reflection Report | Per-scenario root cause, suggestions, retry recommendation |
+| Execution Timeline | Every pipeline stage with timestamp and status |
+| Run Summary | Average confidence, provider, model, version |
+| Provider Benchmark | Latency comparison when benchmarkResults are included |
 
-### Python Agent (`python-agent/requirements.txt`)
-
-| Package | Purpose |
-|---|---|
-| `browser-use >= 0.12.0` | AI-driven browser crawl and interaction |
-| `selenium >= 4.0.0` | Selenium bindings for the Python agent |
+**`RegressionReport.xlsx`** — Generated Playwright test code in tabular form.
 
 ---
 
-## Troubleshooting
+## 🗺 Future Roadmap
 
-### `LLM endpoint is not configured`
-Set `LLM_ENDPOINT` in your `.env` (or environment) and ensure `MODEL_PROVIDER=local`.
+- **Local ROCm Inference** — Offload Planner and Reflection agents to a local Radeon GPU.
+- **Multi-Tab Execution** — Support complex SSO workflows that open new browser contexts.
+- **Visual Diffing** — Pixel-perfect snapshot regression alongside DOM/network assertions.
+- **Self-Healing Selectors** — Use generated Playwright scripts as CI baselines; re-engage the LLM only when a selector breaks.
 
-### `GitHub PAT is not configured`
-Set `GITHUB_PAT` in your `.env` and ensure `MODEL_PROVIDER=github`.
+---
 
-### `Missing required env var: URL` (auto-launch mode)
-All five required variables (`URL`, `USERNAME`, `PASSWORD`, `WORKFLOW_DESCRIPTIONS`, `MODEL`) must be set before running `npm run launch`.
+## 🤝 Contributing
 
-### `Dry-run target URL is not configured`
-Set `DRY_RUN_TARGET_URL` before running `npm run dry-run`.
+Contributions are welcome. Ensure `npm run build` passes before opening a Pull Request. Do not break the `ProviderFactory` abstraction when adding new LLM providers.
 
-### Python agent fails to start
-1. Ensure Python 3.11+ is installed and the path is correct (`PYTHON_PATH` env var).
-2. Activate the virtual environment: `python-agent\.venv\Scripts\activate` (Windows) then `pip install -r python-agent/requirements.txt`.
-3. Confirm `browser-use` is installed: `python -c "import browser_use"`.
+---
 
-### Selenium `SessionNotCreatedException`
-Ensure the ChromeDriver version matches your installed Chrome version. Download the matching driver from [chromedriver.chromium.org](https://chromedriver.chromium.org/) and add it to your `PATH`.
+## 📝 License
 
-### Playwright browser not found
-Run `npx playwright install chromium` (or the required browser) from the project root.
+Distributed under the MIT License. See [`LICENSE`](LICENSE) for details.
 
-### TypeScript compilation errors
-Run `npm run build` to see full error output. Ensure all dependencies are installed with `npm install`.
-Create a `.env` file in the root directory if needed for environment variables:
+---
 
-```bash
-# Example .env file
-NODE_ENV=development
-```
+## 📫 Contact
 
-Refer to your configuration requirements for specific environment variables.
-
-## Troubleshooting
-
-### Common Issues
-
-**Port Already in Use**
-- Change the port in your configuration
-
-**Module Not Found**
-- Ensure all dependencies are installed: `npm install`
-- Clear node_modules and reinstall: `rm -rf node_modules && npm install`
-
-**TypeScript Compilation Errors**
-- Verify TypeScript version: `npm list typescript`
-- Rebuild: `npm run build`
-
-**Playwright Browser Issues**
-- Install Playwright browsers: `npx playwright install`
-
-## Next Steps
-
-After installation:
-
-1. Review the project structure in `src/`
-2. Check the main entry point: `src/index.ts`
-3. Review environment configuration requirements
-4. Run `npm run dev` to start development
-
-## Additional Resources
-
-- [TypeScript Documentation](https://www.typescriptlang.org/docs/)
-- [Playwright Documentation](https://playwright.dev/)
-- [XLSX Documentation](https://github.com/SheetJS/sheetjs)
-
-## License
-
-This project is licensed under the MIT/ISC License.
+Project: [https://github.com/Prakhar601/User-Journey-QA-agentic-tool](https://github.com/Prakhar601/User-Journey-QA-agentic-tool)

@@ -1,8 +1,27 @@
 {
-  "name": "local-ai-regression-agent",
-  "version": "0.1.0",
-  "description": "TypeScript CLI for a local AI regression agent",
+  "name": "autonomous-user-journey-qa-agent",
+  "version": "1.0.0",
+  "description": "Autonomous AI-powered QA agent that plans, executes, reflects, and reports on web testing — AMD AI DevMaster Hackathon submission.",
   "main": "dist/index.js",
+  "homepage": "https://github.com/Prakhar601/User-Journey-QA-agentic-tool#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Prakhar601/User-Journey-QA-agentic-tool.git"
+  },
+  "author": "Prakhar601",
+  "license": "MIT",
+  "keywords": [
+    "qa",
+    "testing",
+    "agentic",
+    "amd",
+    "playwright",
+    "llm",
+    "automation",
+    "reflection",
+    "hackathon"
+  ],
+  "type": "commonjs",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -11,10 +30,6 @@
     "verify": "ts-node src/core/verifyBrowserState.ts",
     "benchmark": "ts-node src/benchmark.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "MIT",
-  "type": "commonjs",
   "dependencies": {
     "dotenv": "^16.4.7",
     "htmlparser2": "^10.1.0",

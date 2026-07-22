@@ -99,12 +99,10 @@ export class BrowserController {
     const page: Page = getPage();
     const locator: Locator = await this.buildSmartLocator(selector, page);
 
-    console.log("SELECTOR:", selector);
     await locator.waitFor({ state: "visible", timeout: this.timeoutMs });
     await locator.scrollIntoViewIfNeeded();
     await locator.click({ timeout: 5000 });
     await page.waitForTimeout(1000);
-    console.log("SUCCESS:", true);
   }
 
   public async scroll(): Promise<void> {
