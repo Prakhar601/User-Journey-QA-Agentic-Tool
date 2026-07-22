@@ -1,186 +1,358 @@
-# AI Regression Agent
+# 🤖 Autonomous User-Journey QA Agent
 
-An AI-powered regression testing agent that uses Large Language Models (LLMs) to plan, execute, and evaluate browser-based workflows automatically. It supports both **Playwright** and **Selenium** for browser automation, and both **local LLMs** (Ollama-compatible) and **GitHub Models** as AI backends.
+> **AMD AI DevMaster Hackathon Submission**
+> An autonomous, multi-agent AI system that plans, executes, reflects on, and reports website QA workflows — end-to-end, without human intervention.
+
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue.svg)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
+[![Playwright](https://img.shields.io/badge/Playwright-1.50-orange.svg)](https://playwright.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#architecture-overview)
-2. [Prerequisites](#prerequisites)
-3. [Project Structure](#project-structure)
-4. [Installation](#installation)
-5. [Configuration](#configuration)
-6. [Environment Variables Reference](#environment-variables-reference)
-7. [Running the Agent](#running-the-agent)
-8. [Available Scripts](#available-scripts)
-9. [Dependencies](#dependencies)
-10. [Troubleshooting](#troubleshooting)
+1. [Problem Statement](#problem-statement)
+2. [Solution Overview](#solution-overview)
+3. [Architecture](#architecture)
+4. [Agent Pipeline](#agent-pipeline)
+5. [Key Features](#key-features)
+6. [AMD Integration](#amd-integration)
+7. [Supported Providers](#supported-providers)
+8. [Technology Stack](#technology-stack)
+9. [Folder Structure](#folder-structure)
+10. [Installation](#installation)
+11. [Configuration](#configuration)
+12. [Quick Start](#quick-start)
+13. [Running Benchmarks](#running-benchmarks)
+14. [Generating Reports](#generating-reports)
+15. [Example Outputs](#example-outputs)
+16. [Future Work](#future-work)
+17. [License](#license)
+18. [Acknowledgements](#acknowledgements)
 
 ---
 
-## Architecture Overview
+## Problem Statement
+
+Modern web applications are complex, dynamic, and constantly evolving. Traditional QA approaches require:
+- **Human testers** writing and maintaining hundreds of test scripts.
+- **Static test suites** that break on every UI change.
+- **No reasoning** about *why* a test failed or *what* to try next.
+- **No cross-provider intelligence** to measure inference quality vs. cost.
+
+This leaves teams with slow feedback loops, expensive human review cycles, and zero visibility into *autonomous reasoning* quality.
+
+---
+
+## Solution Overview
+
+The **Autonomous User-Journey QA Agent** is a multi-agent AI system that autonomously:
+
+1. **Plans** test scenarios from natural-language workflow descriptions or PRDs.
+2. **Executes** them against live websites using a real browser (Playwright or Selenium).
+3. **Adapts** in real-time — the adaptive execution loop observes the page, picks the next action, and evaluates assertion progress at every step.
+4. **Classifies** failures deterministically (timeout, selector missing, auth failure, etc.).
+5. **Scores confidence** in the result using observable execution signals — no LLM guessing.
+6. **Reflects** post-execution using an LLM to produce structured root-cause analysis and retry recommendations.
+7. **Reports** everything into a rich Excel workbook with 8 dedicated sheets, suitable for engineers and non-technical stakeholders alike.
+8. **Benchmarks** every configured LLM provider for latency, TTFT, token throughput, and JSON conformity.
+
+> The system works with **AMD**, **GitHub Models**, or **Ollama** as the LLM backend — switchable with a single environment variable.
+
+---
+
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  Entry Points                        │
-│  src/index.ts (interactive CLI)                      │
-│  src/autoLaunch.ts (env-var driven, CI-friendly)     │
-└───────────────────┬─────────────────────────────────┘
-                    │
-          ┌─────────▼──────────┐
-          │  Orchestrator       │
-          │  src/core/          │
-          └──┬──────────┬──────┘
-             │          │
-   ┌──────────▼──┐  ┌───▼──────────────┐
-   │ AI Agents   │  │ Browser Control  │
-   │ src/agents/ │  │ src/browser/     │
-   │  - Planner  │  │  - Playwright    │
-   │  - Generator│  │  - Selenium      │
-   │  - Evaluator│  └──────────────────┘
-   └──────┬──────┘
-          │
-   ┌──────▼──────────────┐    ┌─────────────────────┐
-   │ LLM Backends        │    │ Python Browser Agent │
-   │ src/ai/             │    │ python-agent/        │
-   │  - Local (Ollama)   │    │  browser_agent.py    │
-   │  - GitHub Models    │    │  (browser-use lib)   │
-   └─────────────────────┘    └─────────────────────┘
-          │
-   ┌──────▼──────────────┐
-   │ Reporting           │
-   │ src/reporting/      │
-   │  - Excel (.xlsx)    │
-   │  - Network summary  │
-   │  - Regression skels │
-   └─────────────────────┘
+╔══════════════════════════════════════════════════════════════════════════╗
+║                         ENTRY POINTS                                     ║
+║  src/index.ts (interactive CLI)   ·   src/autoLaunch.ts (CI/env-driven) ║
+╚═══════════════════════════════════════╤══════════════════════════════════╝
+                                        │
+                          ╔═════════════▼══════════════╗
+                          ║        ORCHESTRATOR         ║
+                          ║      src/core/orchestrator  ║
+                          ╚══════╤══════════════╤═══════╝
+                                 │              │
+              ╔══════════════════▼╗    ╔════════▼════════════╗
+              ║    AGENT PIPELINE ║    ║  BROWSER AUTOMATION  ║
+              ║  src/agents/      ║    ║  src/browser/        ║
+              ║  ┌─────────────┐  ║    ║  ┌───────────────┐   ║
+              ║  │  Planner    │  ║    ║  │  Playwright   │   ║
+              ║  │  Generator  │  ║    ║  │  Selenium     │   ║
+              ║  │  Evaluator  │  ║    ║  │  ActionDisp.  │   ║
+              ║  │  Classifier │  ║    ║  │  Assertions   │   ║
+              ║  │  Confidence │  ║    ║  │  DOM Parser   │   ║
+              ║  │  Reflection │  ║    ║  │  Network Anal.│   ║
+              ║  └─────────────┘  ║    ║  └───────────────┘   ║
+              ╚══════════╤════════╝    ╚══════════════════════╝
+                         │
+              ╔══════════▼════════════════════════════╗
+              ║         PROVIDER LAYER                 ║
+              ║  src/ai/providerFactory.ts             ║
+              ║  ┌──────────┐  ┌─────┐  ┌──────────┐  ║
+              ║  │  GitHub  │  │ AMD │  │  Ollama  │  ║
+              ║  │  Models  │  │     │  │  Local   │  ║
+              ║  └──────────┘  └─────┘  └──────────┘  ║
+              ╚══════════╤════════════════════════════╝
+                         │
+              ╔══════════▼════════════════════════════╗
+              ║         REPORTING PIPELINE             ║
+              ║  src/reporting/                        ║
+              ║  ┌─────────────────────────────────┐   ║
+              ║  │ Sheet 1: Test Results (enhanced) │   ║
+              ║  │ Sheet 2: Executive Summary       │   ║
+              ║  │ Sheet 3: System Analysis         │   ║
+              ║  │ Sheet 4: Summary                 │   ║
+              ║  │ Sheet 5: AI Reflection Report    │   ║
+              ║  │ Sheet 6: Execution Timeline      │   ║
+              ║  │ Sheet 7: Run Summary             │   ║
+              ║  │ Sheet 8: Provider Benchmark      │   ║
+              ║  └─────────────────────────────────┘   ║
+              ╚══════════════════════════════════════╝
+
+              ╔══════════════════════════════════════╗
+              ║        BENCHMARK PIPELINE             ║
+              ║  src/benchmark/runBenchmark.ts        ║
+              ║  → JSON  → Markdown  → Excel          ║
+              ╚══════════════════════════════════════╝
 ```
 
 ---
 
-## Prerequisites
+## Agent Pipeline
 
-| Requirement | Version | Notes |
-|---|---|---|
-| **Node.js** | 18 or later | [nodejs.org](https://nodejs.org/) |
-| **npm** | 9 or later | Bundled with Node.js |
-| **Python** | 3.11 or later | Required for the browser-use agent |
-| **pip** | Latest | Bundled with Python |
-| **Ollama** *(local mode)* | Latest | [ollama.com](https://ollama.com/) – run a local model |
-| **GitHub PAT** *(GitHub mode)* | — | Needs `models:read` scope |
-| **ChromeDriver** *(Selenium only)* | Match Chrome version | [chromedriver.chromium.org](https://chromedriver.chromium.org/) |
-| **Git** | Any | Optional, for version control |
+The system orchestrates **six specialized AI agents** in a sequential pipeline:
+
+| # | Agent | Phase | LLM? | Purpose |
+|---|-------|-------|------|---------|
+| 1 | **Planner Agent** | Planning | ✅ | Converts workflow descriptions or PRDs into a structured test plan with step-level assertions |
+| 2 | **Generator Agent** | Generation | ✅ | Produces Playwright/Selenium test skeletons from the plan |
+| 3 | **Evaluator Agent** | Execution | ✅ | Evaluates assertion progress at every step of the adaptive loop |
+| 4 | **Failure Classifier** | Post-execution | ❌ (deterministic) | Classifies the failure type from observable signals — no LLM needed |
+| 5 | **Confidence Scorer** | Post-execution | ❌ (deterministic) | Computes a weighted confidence score from assertion progress, stability, and stop reason |
+| 6 | **Reflection Agent** | Post-execution | ✅ | Calls the active LLM once per scenario to produce structured root-cause analysis and recommendations |
+
+### Adaptive Execution Loop
+
+The heart of the system is the adaptive execution loop inside `src/core/orchestrator.ts`:
+
+```
+WHILE assertions not all fulfilled AND steps < limit AND not stuck:
+  1. Observe current page DOM + network state
+  2. LLM decides next action (click, type, navigate, wait...)
+  3. ActionDispatcher executes it in the browser
+  4. AssertionChecker evaluates all assertion contracts
+  5. EvaluatorAgent updates partial score
+  6. Loop continues or exits with a stop reason
+```
+
+Stop reasons: `ALL_FULFILLED` · `TIMEOUT` · `MAX_STEPS` · `STUCK` · `ACTION_FAILED` · `LLM_ERROR` · `ASSERTIONS_UNREACHABLE` · `EXPLICIT_STOP`
 
 ---
 
-## Project Structure
+## Key Features
+
+### 🧠 Multi-Agent AI Reasoning
+- Six specialized agents — each with a single, well-defined responsibility.
+- Deterministic failure classification and confidence scoring (no LLM hallucination risk in critical analysis).
+- LLM-powered reflection with structured output (summary, root cause, evidence, suggestions, retry recommendation).
+
+### 🔄 Adaptive Execution
+- Real-time page observation + action selection at every step.
+- DOM parsing, network log analysis, and assertion-state tracking.
+- Automatic stop-reason classification on exit.
+
+### 📊 Intelligence-Rich Reporting
+Eight Excel worksheets per run, surfacing all AI reasoning to any stakeholder:
+- **Test Results** — pass/fail with confidence, failure class, and reflection summary columns.
+- **AI Reflection Report** — full LLM reasoning per scenario.
+- **Execution Timeline** — chronological event log of every pipeline stage.
+- **Run Summary** — aggregate metrics, average confidence, and reflection success rate.
+- **Provider Benchmark** — cross-provider latency and quality comparison.
+
+### ⚡ Provider Benchmarking
+Compare GitHub Models, AMD, and Ollama on:
+- Request latency (wall clock + provider-reported inference time)
+- Time to first token (TTFT via streaming)
+- Token throughput (prompt/completion/total)
+- JSON conformity rate
+- Failure rate and failure reasons
+
+### 🔌 Provider-Agnostic Design
+All LLM calls route through a single `ProviderFactory`. Switching from GitHub Models to AMD requires only changing `MODEL_PROVIDER=amd` in `.env`.
+
+---
+
+## AMD Integration
+
+This project provides **first-class AMD support** through the `AMDModelProvider` class in `src/ai/modelProvider.ts`.
+
+### How AMD is Used
+
+| Component | AMD Role |
+|-----------|----------|
+| **Planner Agent** | Plans test scenarios using AMD inference |
+| **Generator Agent** | Generates test skeletons via AMD |
+| **Evaluator Agent** | Evaluates assertions using AMD |
+| **Reflection Agent** | Post-execution reasoning via AMD |
+| **Benchmark** | Benchmarked alongside GitHub and Ollama |
+
+### AMD Configuration
+
+```bash
+MODEL_PROVIDER=amd
+AMD_BASE_URL=https://api.amd.com/v1      # AMD Cloud endpoint
+AMD_API_KEY=your_amd_api_key
+AMD_MODEL=meta-llama/Llama-3.1-8B-Instruct
+AMD_TIMEOUT=120000
+```
+
+### AMD Provider Implementation
+
+The `AMDModelProvider` implements the full `ModelProvider` interface:
+- `generateResponse()` — OpenAI-compatible chat completions
+- `streamResponse()` — Streaming for TTFT measurement
+- `healthCheck()` — Connectivity validation
+- `listModels()` — Available model enumeration
+
+All AMD calls use the **same abstraction layer** as GitHub Models and Ollama — no special-cased provider logic anywhere in the system.
+
+---
+
+## Supported Providers
+
+| Provider | Variable | Model Example | Notes |
+|----------|----------|---------------|-------|
+| **AMD Radeon Cloud** | `MODEL_PROVIDER=amd` | `meta-llama/Llama-3.1-8B-Instruct` | Primary hackathon provider |
+| **GitHub Models** | `MODEL_PROVIDER=github` | `openai/gpt-4.1-mini` | Requires GitHub PAT |
+| **Ollama (Local)** | `MODEL_PROVIDER=ollama` | `llama3`, `mistral`, `phi3` | Requires local Ollama server |
+
+All three providers are benchmarked automatically when credentials are present.
+
+---
+
+## Technology Stack
+
+| Layer | Technology |
+|-------|-----------|
+| **Language** | TypeScript 5.6 |
+| **Runtime** | Node.js 18+ |
+| **Browser Automation** | Playwright 1.50, Selenium 4.35 |
+| **LLM Providers** | AMD Radeon Cloud, GitHub Models, Ollama |
+| **Excel Reporting** | SheetJS (xlsx) |
+| **DOM Parsing** | htmlparser2 |
+| **CLI** | readline-sync |
+| **Config** | dotenv |
+| **Python Agent** | browser-use (supplemental) |
+
+---
+
+## Folder Structure
 
 ```
-ai-model-main/
-├── src/                          # TypeScript source (compiled to dist/)
-│   ├── index.ts                  # Interactive CLI entry point
-│   ├── autoLaunch.ts             # Non-interactive (env-var) entry point
-│   ├── agents/                   # AI agent roles
-│   │   ├── plannerAgent.ts       # Generates test plans from workflow descriptions
-│   │   ├── generatorAgent.ts     # Generates Playwright/Selenium test skeletons
-│   │   └── evaluatorAgent.ts     # Evaluates actual vs expected behaviour
+User-Journey-QA-agentic-tool/
+│
+├── src/
+│   ├── index.ts                      # Interactive CLI entry point
+│   ├── autoLaunch.ts                 # Non-interactive / CI entry point
+│   ├── benchmark.ts                  # Benchmark runner entry point
+│   │
+│   ├── agents/
+│   │   ├── plannerAgent.ts           # Workflow description → test plan
+│   │   ├── generatorAgent.ts         # Test plan → Playwright/Selenium skeleton
+│   │   ├── evaluatorAgent.ts         # Assertion evaluation during adaptive loop
+│   │   ├── failureClassifier.ts      # Deterministic failure taxonomy (no LLM)
+│   │   ├── confidenceScorer.ts       # Weighted confidence score (no LLM)
+│   │   └── reflectionAgent.ts        # Post-execution LLM reasoning
+│   │
 │   ├── ai/
-│   │   ├── githubModelsClient.ts # Unified callModel() – routes to local or GitHub
-│   │   ├── modelProvider.ts      # LocalLLMProvider / GitHubModelsProvider
-│   │   ├── mcpClient.ts          # Spawns python-agent/browser_agent.py
-│   │   └── scenarioGenerator.ts  # PRD → test scenario expansion
+│   │   ├── modelProvider.ts          # AMDModelProvider, GitHubModelsProvider, OllamaModelProvider
+│   │   ├── providerFactory.ts        # createModelProvider() — single routing entry point
+│   │   ├── providerConfig.ts         # Environment variable resolution + detectEnabledProviders()
+│   │   ├── githubModelsClient.ts     # callModel() — provider-agnostic LLM call wrapper
+│   │   ├── inferenceLogger.ts        # Structured LLM call logging
+│   │   ├── scenarioGenerator.ts      # PRD → scenario expansion
+│   │   ├── mcpClient.ts              # Python browser-use agent bridge
+│   │   └── loadEnv.ts                # .env file loader
+│   │
 │   ├── browser/
-│   │   ├── browserController.ts  # Playwright browser controller
-│   │   ├── browserSession.ts     # Playwright session/network log management
-│   │   └── seleniumBrowserController.ts  # Selenium WebDriver controller
-│   ├── config/
-│   │   ├── loadConfig.ts         # Reads config/config.json with defaults
-│   │   └── executionConfig.ts    # ExecutionConfig interface
+│   │   ├── browserController.ts      # Playwright session + page management
+│   │   ├── browserSession.ts         # Network log capture and session state
+│   │   ├── seleniumBrowserController.ts  # Selenium WebDriver controller
+│   │   ├── actionDispatcher.ts       # Executes AI-decided browser actions
+│   │   ├── assertionChecker.ts       # Real-time assertion contract evaluation
+│   │   ├── domParser.ts              # Page DOM extraction for LLM context
+│   │   └── networkAnalyzer.ts        # Network request log analysis
+│   │
 │   ├── core/
-│   │   ├── orchestrator.ts       # Main workflow driver
-│   │   ├── retry.ts              # Retry with back-off
-│   │   ├── state.ts              # Agent state management
-│   │   ├── types.ts              # Shared TypeScript interfaces
-│   │   ├── validateBrowserState.ts
-│   │   └── verifyBrowserState.ts
+│   │   ├── orchestrator.ts           # Main adaptive execution loop
+│   │   ├── types.ts                  # All shared TypeScript interfaces
+│   │   ├── state.ts                  # AgentState container
+│   │   ├── retry.ts                  # Exponential back-off retry
+│   │   ├── validateBrowserState.ts   # Pre-step browser state validation
+│   │   └── verifyBrowserState.ts     # Post-step browser state verification
+│   │
+│   ├── benchmark/
+│   │   └── runBenchmark.ts           # Provider benchmark runner + formatBenchmarkConsole()
+│   │
 │   └── reporting/
-│       ├── excelReporter.ts      # Writes TestResults.xlsx and regression reports
-│       ├── networkSummary.ts     # Network log summarisation
-│       ├── outputManager.ts      # Manages output/ folder structure
-│       ├── regressionSkeletonGenerator.ts
-│       └── types.ts
-├── python-agent/
-│   ├── browser_agent.py          # browser-use powered crawl/login agent
-│   └── requirements.txt          # Python dependencies
+│       ├── excelReporter.ts          # 8-sheet Excel workbook generation
+│       ├── reflectionReportSheet.ts  # Sheets 5–8: Reflection, Timeline, Summary, Benchmark
+│       ├── outputManager.ts          # Output directory structure management
+│       ├── networkSummary.ts         # Network metric summarization
+│       ├── regressionSkeletonGenerator.ts  # Regression test skeleton output
+│       └── types.ts                  # Reporting-layer type definitions
+│
 ├── config/
-│   └── config.json               # Static runtime configuration
-├── dist/                         # Compiled JavaScript (auto-generated)
-├── output/                       # Test reports, screenshots (auto-generated)
-├── dryRunAudit.js                # Standalone dry-run report generator
-├── package.json                  # Node.js project manifest & scripts
-├── tsconfig.json                 # TypeScript compiler options
-├── .env.example                  # Environment variable template
-└── .gitignore
+│   └── config.json                   # Static runtime configuration
+│
+├── python-agent/
+│   ├── browser_agent.py              # AI-driven supplemental browser agent
+│   └── requirements.txt
+│
+├── output/                           # Auto-generated: reports, screenshots
+├── benchmark/                        # Auto-generated: benchmark JSON/MD/xlsx
+├── .env.example                      # Environment variable template
+├── .gitignore
+├── package.json
+└── tsconfig.json
 ```
 
 ---
 
 ## Installation
 
-### 1. Clone or navigate to the project
+### Prerequisites
+
+| Requirement | Version | Notes |
+|---|---|---|
+| **Node.js** | 18+ | [nodejs.org](https://nodejs.org/) |
+| **npm** | 9+ | Bundled with Node.js |
+| **Python** *(optional)* | 3.11+ | Only needed for supplemental browser-use agent |
+| **Ollama** *(local mode)* | Latest | [ollama.com](https://ollama.com/) |
+| **AMD API Key** *(AMD mode)* | — | AMD Radeon Cloud credentials |
+| **GitHub PAT** *(GitHub mode)* | — | `models:read` scope required |
+
+### Steps
 
 ```bash
-git clone <repository-url>
-cd ai-model-main
-```
+# 1. Clone the repository
+git clone https://github.com/Prakhar601/User-Journey-QA-agentic-tool.git
+cd User-Journey-QA-agentic-tool
 
-### 2. Install Node.js dependencies
-
-```bash
+# 2. Install Node.js dependencies
 npm install
-```
 
-### 3. Install Playwright browsers
-
-```bash
+# 3. Install Playwright browser
 npx playwright install chromium
-# Install additional browsers if needed:
-# npx playwright install firefox
-# npx playwright install webkit
-```
 
-### 4. Set up the Python environment
+# 4. Create your .env file
+cp .env.example .env    # macOS / Linux
+copy .env.example .env  # Windows
 
-```bash
-cd python-agent
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
-
-pip install -r requirements.txt
-cd ..
-```
-
-### 5. Create your `.env` file
-
-```bash
-copy .env.example .env   # Windows
-# cp .env.example .env   # macOS / Linux
-```
-
-Edit `.env` with your values (see [Environment Variables Reference](#environment-variables-reference)).
-
-### 6. (Optional) Install and start Ollama for local LLM mode
-
-```bash
-# Download from https://ollama.com and then:
-ollama pull llama3
-ollama serve
+# 5. Edit .env with your provider credentials (see Configuration below)
 ```
 
 ---
@@ -189,268 +361,257 @@ ollama serve
 
 ### `config/config.json`
 
-Controls static runtime behaviour. All fields have defaults and are optional:
-
 ```json
 {
-  "automationTool": "playwright",   // "playwright" | "selenium"
-  "browser":        "chromium",     // "chromium" | "chrome" | "firefox"
-  "headless":       true,           // true = no visible browser window
-  "timeoutSeconds": 60,             // per-step timeout
-  "concurrency":    1,              // parallel workflow limit (max 5)
-  "regressionSweep": true,          // run full regression sweep after workflows
-  "outputFolder":   "output",       // relative folder for reports/screenshots
-  "environment":    "local"         // label for reports
+  "automationTool": "playwright",  // "playwright" | "selenium"
+  "browser":        "chromium",    // "chromium" | "chrome" | "firefox"
+  "headless":       true,          // run without a visible browser window
+  "timeoutSeconds": 60,            // per-step timeout in seconds
+  "concurrency":    1,             // parallel scenario limit (max 5)
+  "regressionSweep": false,        // run regression sweep after main run
+  "outputFolder":   "output",      // relative path for reports and screenshots
+  "environment":    "local"        // environment label in reports
 }
 ```
 
-### `.env`
+### Environment Variables
 
-Copy `.env.example` to `.env` and fill in the required values for your chosen provider:
+Copy `.env.example` to `.env` and fill in the values for your chosen provider:
+
+#### AMD Provider (Recommended for Hackathon)
 
 ```bash
-# Local LLM (Ollama)
-MODEL_PROVIDER=local
-LLM_ENDPOINT=http://localhost:11434
-LLM_MODEL=llama3
+MODEL_PROVIDER=amd
+AMD_BASE_URL=https://api.amd.com/v1
+AMD_API_KEY=your_amd_api_key_here
+AMD_MODEL=meta-llama/Llama-3.1-8B-Instruct
+AMD_TIMEOUT=120000
+```
 
-# OR GitHub Models
+#### GitHub Models Provider
+
+```bash
 MODEL_PROVIDER=github
 GITHUB_PAT=ghp_xxxxxxxxxxxxxxxxxxxx
 GITHUB_MODEL=openai/gpt-4.1-mini
 ```
 
----
+#### Ollama / Local Provider
 
-## Environment Variables Reference
+```bash
+MODEL_PROVIDER=ollama
+LLM_ENDPOINT=http://localhost:11434
+LLM_MODEL=llama3
+```
 
-### LLM Provider Selection
+#### Full Environment Variable Reference
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `MODEL_PROVIDER` | No | `local` | `local` (Ollama) or `github` (GitHub Models) |
-
-### Local LLM Mode (`MODEL_PROVIDER=local`)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `LLM_ENDPOINT` | **Yes** | — | Base URL of your Ollama server, e.g. `http://localhost:11434` |
-| `LLM_MODEL` | **Yes** | — | Model name, e.g. `llama3`, `mistral`, `phi3` |
-| `LLM_PROVIDER` | No | `ollama` | Provider hint, usually `ollama` |
-
-### GitHub Models Mode (`MODEL_PROVIDER=github`)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `GITHUB_PAT` | **Yes** | — | GitHub Personal Access Token with `models:read` scope |
-| `GITHUB_MODEL` | No | `openai/gpt-4.1-mini` | GitHub Models inference model ID |
-
-### Python Agent
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `PYTHON_PATH` | No | `python` | Full path to the Python executable (e.g. `C:\...\python.exe`) |
-
-### Auto-Launch Mode (`npm run launch`)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `URL` | **Yes** | — | Target web application URL |
-| `USERNAME` | **Yes** | — | Login username |
-| `PASSWORD` | **Yes** | — | Login password |
-| `WORKFLOW_DESCRIPTIONS` | **Yes** | — | Comma-separated workflow descriptions or full PRD text |
-| `MODEL` | **Yes** | — | Model name to use (matches `LLM_MODEL` or `GITHUB_MODEL`) |
-| `GITHUB_TOKEN` | No | — | GitHub PAT (only for GitHub Models in auto-launch mode) |
-| `AUTOMATION_TOOL` | No | `playwright` | `playwright` or `selenium` |
-| `TIMEOUT_SECONDS` | No | `60` | Request timeout in seconds |
-
-### Dry-Run Report (`npm run dry-run`)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DRY_RUN_TARGET_URL` | **Yes** | — | Target URL to embed in the audit Excel report |
-| `DRY_RUN_MODEL` | No | `test-model` | Model name label in the report |
+| Variable | Default | Description |
+|---|---|---|
+| `MODEL_PROVIDER` | `ollama` | Active provider: `github` \| `amd` \| `ollama` |
+| `MODEL_NAME` | — | Override model for all providers |
+| `AMD_BASE_URL` | — | AMD Cloud API base URL |
+| `AMD_API_KEY` | — | AMD authentication key |
+| `AMD_MODEL` | — | AMD model identifier |
+| `AMD_TIMEOUT` | `120000` | AMD request timeout (ms) |
+| `GITHUB_PAT` | — | GitHub Personal Access Token |
+| `GITHUB_MODEL` | `openai/gpt-4.1-mini` | GitHub Models model ID |
+| `LLM_ENDPOINT` | — | Ollama server URL |
+| `LLM_MODEL` | — | Ollama model name |
+| `LLM_TIMEOUT` | `120000` | Generic LLM timeout (ms) |
+| `URL` | — | Target URL (auto-launch mode) |
+| `USERNAME` | — | Login username (auto-launch mode) |
+| `PASSWORD` | — | Login password (auto-launch mode) |
+| `WORKFLOW_DESCRIPTIONS` | — | Comma-separated workflows (auto-launch mode) |
+| `BENCHMARK_PROVIDERS` | all configured | Comma-separated: `github,amd,ollama` |
+| `BENCHMARK_RETRIES` | `1` | Retries per provider in benchmark |
 
 ---
 
-## Running the Agent
+## Quick Start
 
-### Mode 1 — Interactive CLI (`npm run dev`)
-
-Prompts for all inputs at the terminal. Best for local exploration:
+### Interactive Mode (recommended for first run)
 
 ```bash
 npm run dev
 ```
 
 You will be prompted for:
-- **URL** – the web application to test
-- **Username** and **Password** – login credentials
-- **Workflow description or PRD** – comma-separated workflow names, or paste a full PRD (>200 chars triggers automatic scenario expansion)
-- **Timeout**, **automation tool**, **browser**, **headless mode**, and **output folder** – all have defaults from `config/config.json`
+- Target URL
+- Login credentials
+- Workflow descriptions (or a full PRD — >200 chars triggers automatic scenario expansion)
+- Timeout, browser, headless mode, output folder
 
-### Mode 2 — Auto-Launch / CI mode (`npm run launch`)
-
-Non-interactive; reads everything from environment variables. Suitable for CI/CD pipelines:
+### CI / Non-Interactive Mode
 
 ```bash
-# Set variables inline (Windows PowerShell)
-$env:MODEL_PROVIDER="local"
-$env:LLM_ENDPOINT="http://localhost:11434"
-$env:LLM_MODEL="llama3"
-$env:URL="https://your-app.com"
-$env:USERNAME="admin"
-$env:PASSWORD="secret"
-$env:WORKFLOW_DESCRIPTIONS="Login and verify dashboard,Add item to cart"
-$env:MODEL="llama3"
-
+# Set environment variables then:
 npm run launch
 ```
 
-Or with a `.env` file already populated:
+### With AMD (Hackathon Demo)
 
 ```bash
-npm run launch
-```
+# .env must have AMD credentials set
+MODEL_PROVIDER=amd
+AMD_BASE_URL=https://api.amd.com/v1
+AMD_API_KEY=your_key
+AMD_MODEL=meta-llama/Llama-3.1-8B-Instruct
 
-### Mode 3 — Dry-Run Audit Report (`npm run dry-run`)
-
-Generates a sample Excel report from mock data without executing any browser workflows. Useful to verify the reporting pipeline:
-
-```bash
-$env:DRY_RUN_TARGET_URL="https://your-app.com"
-npm run dry-run
-```
-
-The report is written to `output/<date>/TestResults.xlsx`.
-
-### Mode 4 — Production (pre-compiled, `npm start`)
-
-Run the compiled JavaScript directly (no ts-node overhead):
-
-```bash
-npm run build
-npm start
+npm run dev
+# Enter your target URL, credentials, and workflow descriptions at the prompts
 ```
 
 ---
 
-## Available Scripts
+## Running Benchmarks
 
-| Script | Command | Description |
-|---|---|---|
-| `npm run dev` | `ts-node src/index.ts` | Interactive CLI mode with prompts |
-| `npm run launch` | `ts-node src/autoLaunch.ts` | Non-interactive, env-var driven mode |
-| `npm run build` | `tsc` | Compile TypeScript → `dist/` |
-| `npm start` | `node dist/index.js` | Run compiled output (production) |
-| `npm run dry-run` | `node dryRunAudit.js` | Generate a mock Excel report |
-
----
-
-## Dependencies
-
-### Runtime
-
-| Package | Version | Purpose |
-|---|---|---|
-| `playwright` | ^1.50.0 | Browser automation (Playwright driver) |
-| `@playwright/test` | ^1.50.0 | Test skeleton generation |
-| `selenium-webdriver` | ^4.27.0 | Browser automation (Selenium driver) |
-| `readline-sync` | ^1.4.10 | Synchronous terminal prompts |
-| `dotenv` | ^17.3.1 | Loads `.env` file into `process.env` |
-| `xlsx` | ^0.18.5 | Excel report generation ⚠️ (see note below) |
-| `node-fetch` | ^3.3.2 | HTTP fetch for Node.js |
-| `ts-node` | ^10.9.2 | Run TypeScript files directly |
-| `typescript` | ^5.6.0 | TypeScript compiler |
-
-> ⚠️ **Note on `xlsx`:** The open-source SheetJS community package has a known high-severity prototype-pollution vulnerability with no available fix in the free tier. If this is deployed in a security-sensitive environment, consider replacing it with [`exceljs`](https://github.com/exceljs/exceljs).
-
-### Development
-
-| Package | Purpose |
-|---|---|
-| `@types/node` | TypeScript types for Node.js built-ins |
-| `@types/readline-sync` | TypeScript types for readline-sync |
-| `@types/selenium-webdriver` | TypeScript types for Selenium |
-
-### Python Agent (`python-agent/requirements.txt`)
-
-| Package | Purpose |
-|---|---|
-| `browser-use >= 0.12.0` | AI-driven browser crawl and interaction |
-| `selenium >= 4.0.0` | Selenium bindings for the Python agent |
-
----
-
-## Troubleshooting
-
-### `LLM endpoint is not configured`
-Set `LLM_ENDPOINT` in your `.env` (or environment) and ensure `MODEL_PROVIDER=local`.
-
-### `GitHub PAT is not configured`
-Set `GITHUB_PAT` in your `.env` and ensure `MODEL_PROVIDER=github`.
-
-### `Missing required env var: URL` (auto-launch mode)
-All five required variables (`URL`, `USERNAME`, `PASSWORD`, `WORKFLOW_DESCRIPTIONS`, `MODEL`) must be set before running `npm run launch`.
-
-### `Dry-run target URL is not configured`
-Set `DRY_RUN_TARGET_URL` before running `npm run dry-run`.
-
-### Python agent fails to start
-1. Ensure Python 3.11+ is installed and the path is correct (`PYTHON_PATH` env var).
-2. Activate the virtual environment: `python-agent\.venv\Scripts\activate` (Windows) then `pip install -r python-agent/requirements.txt`.
-3. Confirm `browser-use` is installed: `python -c "import browser_use"`.
-
-### Selenium `SessionNotCreatedException`
-Ensure the ChromeDriver version matches your installed Chrome version. Download the matching driver from [chromedriver.chromium.org](https://chromedriver.chromium.org/) and add it to your `PATH`.
-
-### Playwright browser not found
-Run `npx playwright install chromium` (or the required browser) from the project root.
-
-### TypeScript compilation errors
-Run `npm run build` to see full error output. Ensure all dependencies are installed with `npm install`.
-Create a `.env` file in the root directory if needed for environment variables:
+Compare all configured LLM providers side-by-side:
 
 ```bash
-# Example .env file
-NODE_ENV=development
+npm run benchmark
 ```
 
-Refer to your configuration requirements for specific environment variables.
+The benchmark runner:
+1. Auto-detects all configured providers (AMD, GitHub, Ollama).
+2. Sends an identical structured JSON prompt to each.
+3. Measures: wall-clock latency, provider-reported inference time, TTFT (streaming), token counts, JSON validity.
+4. Prints a formatted summary table to the console.
+5. Writes artifacts to `benchmark/`:
+   - `benchmark.json` — full machine-readable results
+   - `benchmark.xlsx` — formatted Excel comparison
+   - `benchmark.md` — Markdown report
 
-## Troubleshooting
+### Sample Benchmark Console Output
 
-### Common Issues
+```
+──────────────────────────────────────────────────────────────────────────────────────────
+ PROVIDER BENCHMARK RESULTS
+──────────────────────────────────────────────────────────────────────────────────────────
 
-**Port Already in Use**
-- Change the port in your configuration
+  Provider  : AMD
+  Model     : meta-llama/Llama-3.1-8B-Instruct
+  Timestamp : 2026-07-22T09:00:00.000Z
+  Status    : ✅ SUCCESS
+  Latency   : 1843ms (wall clock)
+  Inference : 1720ms (provider-reported)
+  TTFT      : 380ms
+  Tokens    : 42 prompt + 71 completion = 113 total
+  JSON      : ✓ valid
 
-**Module Not Found**
-- Ensure all dependencies are installed: `npm install`
-- Clear node_modules and reinstall: `rm -rf node_modules && npm install`
+  Provider  : GITHUB
+  Model     : openai/gpt-4.1-mini
+  Timestamp : 2026-07-22T09:00:02.100Z
+  Status    : ✅ SUCCESS
+  Latency   : 1204ms (wall clock)
+  Inference : 1100ms (provider-reported)
+  TTFT      : 241ms
+  Tokens    : 42 prompt + 68 completion = 110 total
+  JSON      : ✓ valid
 
-**TypeScript Compilation Errors**
-- Verify TypeScript version: `npm list typescript`
-- Rebuild: `npm run build`
+──────────────────────────────────────────────────────────────────────────────────────────
+  SUMMARY: 2/2 providers succeeded — Avg latency: 1524ms
+──────────────────────────────────────────────────────────────────────────────────────────
+```
 
-**Playwright Browser Issues**
-- Install Playwright browsers: `npx playwright install`
+### Benchmark Provider Selection
 
-## Next Steps
+```bash
+# Only benchmark AMD and GitHub
+BENCHMARK_PROVIDERS=amd,github npm run benchmark
+```
 
-After installation:
+---
 
-1. Review the project structure in `src/`
-2. Check the main entry point: `src/index.ts`
-3. Review environment configuration requirements
-4. Run `npm run dev` to start development
+## Generating Reports
 
-## Additional Resources
+Reports are generated automatically at the end of every run. They are written to `output/<date>/TestResults.xlsx`.
 
-- [TypeScript Documentation](https://www.typescriptlang.org/docs/)
-- [Playwright Documentation](https://playwright.dev/)
-- [XLSX Documentation](https://github.com/SheetJS/sheetjs)
+### Workbook Structure
+
+| Sheet | Contents |
+|-------|----------|
+| **Test Results** | One row per scenario: pass/fail, confidence %, failure class, reflection summary, provider, model |
+| **Executive Summary** | Overall pass rate, scenario counts, timing |
+| **System Analysis** | API call counts, average latency, UI render time, system specs |
+| **Summary** | Network waterfall, AI analysis, internet speed |
+| **AI Reflection Report** | Per-scenario LLM reasoning: root cause, evidence, suggestions, retry recommendation |
+| **Execution Timeline** | Chronological event log: Scenario Started → Adaptive Loop → Assertions → Confidence → Reflection → Completed |
+| **Run Summary** | Run timestamp, provider, model, avg confidence, reflection success rate, avg execution time |
+| **Provider Benchmark** | Cross-provider latency, TTFT, tokens, JSON validity (when benchmark results are included) |
+
+### Dry-Run (no live browser)
+
+Generate a sample workbook without executing any browser workflows:
+
+```bash
+DRY_RUN_TARGET_URL=https://your-app.com npm run dry-run
+```
+
+---
+
+## Example Outputs
+
+### Reflection Report (per scenario)
+
+```json
+{
+  "summary": "Login workflow failed due to a missing error message element after invalid credentials.",
+  "rootCause": "The error toast is dynamically injected after a 500ms delay. The assertion checked too early.",
+  "evidence": [
+    "textPresent:Invalid Credentials assertion failed",
+    "HTTP 401 observed on /api/auth",
+    "Stop reason: TIMEOUT"
+  ],
+  "suggestions": [
+    "Add a wait step before checking the error message",
+    "Assert on network response code instead of DOM text"
+  ],
+  "shouldRetry": true,
+  "retryStrategy": "Add explicit wait for error toast element before assertion",
+  "confidence": 0.87
+}
+```
+
+### Confidence Score Breakdown
+
+```
+Score = (assertionProgress × 0.50) + (executionStability × 0.30) + (stopReasonScore × 0.20)
+      = (0.80 × 0.50) + (0.90 × 0.30) + (1.00 × 0.20)
+      = 0.40 + 0.27 + 0.20
+      = 0.87
+```
+
+### Failure Classifications
+
+The `FailureClassifier` maps stop signals to one of these deterministic classes:
+
+`TIMEOUT` · `MAX_STEPS_REACHED` · `STUCK_STATE` · `LOOP_DETECTED` · `SELECTOR_NOT_FOUND` · `NAVIGATION_FAILED` · `LOGIN_FAILED` · `ASSERTION_PERMANENTLY_FAILED` · `LLM_ERROR` · `NETWORK_ERROR` · `ACTION_FAILED` · `UNKNOWN`
+
+---
+
+## Future Work
+
+- **Retry Loop Integration** — Wire `shouldRetry` from Reflection Agent back into the adaptive loop for automatic remediation.
+- **Historical Regression Tracking** — Store `benchmark.json` per-run and surface trends over time.
+- **Visual Diff Screenshots** — Attach before/after DOM screenshots to the Reflection Report.
+- **Parallel Scenario Concurrency** — Increase concurrency beyond 5 with improved session isolation.
+- **Slack / Webhook Notifications** — Post run summaries to team channels on completion.
+- **MCP Server Mode** — Expose the agent pipeline as a Model Context Protocol server for IDE integration.
+
+---
 
 ## License
 
-This project is licensed under the MIT/ISC License.
+This project is licensed under the **MIT License** — see [LICENSE](LICENSE) for details.
+
+---
+
+## Acknowledgements
+
+- [Playwright](https://playwright.dev/) — reliable cross-browser automation
+- [AMD Radeon Cloud](https://www.amd.com/) — LLM inference backbone for this hackathon
+- [GitHub Models](https://github.com/marketplace/models) — cloud inference via GitHub Marketplace
+- [Ollama](https://ollama.com/) — local LLM serving
+- [SheetJS](https://sheetjs.com/) — Excel workbook generation
+- [browser-use](https://github.com/browser-use/browser-use) — AI-driven browser interaction (supplemental agent)
