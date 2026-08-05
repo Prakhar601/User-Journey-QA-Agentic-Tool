@@ -36,11 +36,19 @@ The system is composed of five decoupled layers, each with clearly defined respo
 │                  │  │                                             │
 │ Planner          │  │  browserController.ts (Playwright)         │
 │ Generator        │  │  seleniumBrowserController.ts              │
+<<<<<<< HEAD
 │ ReflectionAgent  │  │  actionDispatcher.ts                       │
 │ RegressionAgent  │  │  assertionChecker.ts                       │
 └──────────────────┘  │  domParser.ts                              │
                       │  networkAnalyzer.ts                        │
                       └─────────────────────────────────────────────┘
+=======
+│ Evaluator        │  │  actionDispatcher.ts                       │
+│ FailureClassif.  │  │  assertionChecker.ts                       │
+│ ConfidenceScorer │  │  domParser.ts                              │
+│ ReflectionAgent  │  │  networkAnalyzer.ts                        │
+└──────────────────┘  └─────────────────────────────────────────────┘
+>>>>>>> df8ed184ac77e787f6a9575973d9fb03e61b983b
         │
 ┌───────▼──────────────────────────────────────────────────────────┐
 │  PROVIDER LAYER                                                   │

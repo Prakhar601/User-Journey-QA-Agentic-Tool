@@ -47,9 +47,15 @@ You will see:
 Open `.env.example` — find the AMD section:
 ```bash
 MODEL_PROVIDER=amd
+<<<<<<< HEAD
 AMD_BASE_URL=https://api.fireworks.ai/inference/v1
 AMD_API_KEY=your_amd_api_key
 AMD_MODEL=accounts/fireworks/models/deepseek-v4-flash-0731
+=======
+AMD_BASE_URL=https://api.amd.com/v1
+AMD_API_KEY=your_amd_api_key
+AMD_MODEL=meta-llama/Llama-3.1-8B-Instruct
+>>>>>>> df8ed184ac77e787f6a9575973d9fb03e61b983b
 ```
 
 That single `MODEL_PROVIDER=amd` change routes **all six agents** through AMD.

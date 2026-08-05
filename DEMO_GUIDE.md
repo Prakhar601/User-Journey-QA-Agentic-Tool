@@ -167,8 +167,14 @@ npm run benchmark
 
 | Problem | Fallback |
 |---------|---------|
+<<<<<<< HEAD
 | Target website is down | Show the pre-generated `output/TestResults.xlsx` already committed in the repo |
 | AMD API is slow | Pre-saved `benchmark/benchmark.json` can be shown instead |
 | Browser not visible | Check `config/config.json` → `"headless": false` |
+=======
+| Target website is down | Use the `npm run dry-run` command to show pre-generated Excel report |
+| AMD API is slow | Pre-saved `benchmark/benchmark.json` can be shown instead |
+| Browser not visible | Check `config.json` → `"headless": false` |
+>>>>>>> df8ed184ac77e787f6a9575973d9fb03e61b983b
 | Reflection fails | Show the fallback report in the Excel — the system never crashes on missing reflection |
 | LLM returns invalid JSON | Show the `FailureClassifier` output — it catches `LLM_ERROR` deterministically |
